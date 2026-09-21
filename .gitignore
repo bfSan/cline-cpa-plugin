@@ -1,0 +1,7 @@
+cline.so
+cline.h
+*.so
+*.h
+dist/
+coverage.out
+coverage.html

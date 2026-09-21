@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cline</title>
+<style>
+:root{
+  --bg:#f7f7f5;--card:#fff;--border:#e4e4e1;--fg:#202020;--mut:#747474;
+  --acc:#356fe0;--on-acc:#fff;--ok:#138a5b;--warn:#b67800;--err:#bd3e35;
+  --surface:#f2f2ef;--input:#fff;--radius:8px
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#1b1c1e;--card:#25272a;--border:#3a3d41;--fg:#f0f1f2;--mut:#a4a8ae;
+    --surface:#303338;--input:#202225;--acc:#6c9df2;--on-acc:#101214}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:1120px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+button{background:var(--acc);color:var(--on-acc);border:0;border-radius:var(--radius);padding:8px 13px;cursor:pointer;font-size:13px}
+button.sec{background:var(--surface);color:var(--fg);border:1px solid var(--border)}
+button.danger{background:var(--err);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.status{margin-left:auto;color:var(--mut);font-size:12px}
+.panels{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:16px}
+@media (max-width:820px){.panels{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.card h2{font-size:15px;margin:0 0 12px}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--border)}
+.kv:first-of-type{border-top:0}.k{color:var(--mut)}.v{text-align:right;word-break:break-all}
+.groups{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tag{border:1px solid var(--border);background:var(--surface);border-radius:99px;padding:5px 10px;cursor:pointer;font-size:12px}
+.tag.active{background:var(--acc);border-color:var(--acc);color:var(--on-acc)}
+.rows{display:flex;flex-direction:column;gap:6px;max-height:560px;overflow:auto}
+.row{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+.row.hidden{opacity:.55}
+.id{font:12px ui-monospace,SFMono-Regular,monospace;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.name{font-size:12px;color:var(--mut);max-width:28%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row button{padding:5px 8px;font-size:12px}
+.empty,.err{padding:12px;border:1px dashed var(--border);border-radius:var(--radius);color:var(--mut)}
+.err{color:var(--err);border-color:var(--err)}
+.login-url{font:12px ui-monospace,SFMono-Regular,monospace;word-break:break-all;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-top:10px}
+.footer{margin-top:18px;color:var(--mut);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Cline / ClinePass</h1>
+  <div class="sub">OAuth 订阅接入，不使用 API Key。订阅权益不足的模型会明确报错，不会让整个账号进入冷却。</div>
+  <div id="authBox" class="err" style="display:none">
+    <label class="hint" for="keyInput">管理密钥（management key）</label>
+    <div class="bar" style="margin-top:6px">
+      <input id="keyInput" type="password" placeholder="粘贴 management key" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--input);color:var(--fg)">
+      <button id="keySave">保存</button>
+    </div>
+    <p class="hint">面板内嵌在 CPA 时会自动读取主面板密钥；直接打开时需要手动填入。</p>
+  </div>
+  <div class="bar">
+    <button id="refresh">刷新</button>
+    <button class="sec" id="login">OAuth 登录</button>
+    <span class="status" id="status"></span>
+  </div>
+  <div class="panels">
+    <section class="card">
+      <h2>账号</h2>
+      <div id="accounts" class="empty">加载中...</div>
+      <div id="loginBox"></div>
+    </section>
+    <section class="card">
+      <h2>模型</h2>
+      <div id="groups" class="groups"></div>
+      <div id="models" class="empty">加载中...</div>
+    </section>
+  </div>
+  <div class="footer">管理接口：<code id="apiPath">/v0/management/plugins/cline</code></div>
+</div>
+<script>
+/* ---------- management key acquisition ----------
+   1) ?key= URL param (kept in sessionStorage).
+   2) sessionStorage (manual input).
+   3) CPA main panel localStorage "cli-proxy-auth" (XOR+base64, same-origin
+      iframe embed) — same approach as the Qoder/WorkBuddy plugins.
+*/
+const MANAGEMENT_BASE_PATH=__CLINE_MANAGEMENT_BASE_PATH_JSON__;
+const API=MANAGEMENT_BASE_PATH+"/plugins/cline";
+const ENC_PREFIX="enc::v1::";
+const SECRET_SALT="cli-proxy-api-webui::secure-storage";
+const PANEL_STORE="cli-proxy-auth";
+const SS_KEY="cline-mgmt-key";
+let keySuppressed=false;
+
+function _enc(t){return new TextEncoder().encode(t)}
+function _dec(b){return new TextDecoder().decode(b)}
+function _keyBytes(){try{return _enc(SECRET_SALT+"|"+window.location.host+"|"+navigator.userAgent)}catch(e){return _enc(SECRET_SALT)}}
+function _xor(d,k){const r=new Uint8Array(d.length);for(let i=0;i<d.length;i++)r[i]=d[i]^k[i%k.length];return r}
+function _b64e(b){let s="";for(let i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s)}
+function _b64d(s){const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b}
+function deobfuscate(p){if(!p||!p.startsWith(ENC_PREFIX))return p;try{return _dec(_xor(_b64d(p.slice(ENC_PREFIX.length)),_keyBytes()))}catch(e){return p}}
+function isEmbedded(){try{return window.self!==window.top}catch(e){return false}}
+
+function readSessionKey(){if(keySuppressed)return null;try{return sessionStorage.getItem(SS_KEY)}catch(_){return null}}
+function storeSessionKey(key){try{sessionStorage.setItem(SS_KEY,key);keySuppressed=false;return true}catch(_){return false}}
+function readPanelKey(){
+  if(!isEmbedded())return null;
+  let raw;try{raw=localStorage.getItem(PANEL_STORE)}catch(e){return null}
+  if(!raw)return null;
+  try{
+    const parsed=JSON.parse(deobfuscate(raw));
+    const st=(parsed&&parsed.state)||parsed||{};
+    return typeof st.managementKey==="string"&&st.managementKey?st.managementKey:null;
+  }catch(e){return null}
+}
+function captureUrlKey(){
+  const url=new URL(window.location.href);
+  const key=url.searchParams.get("key");
+  if(!key) return;
+  try{if(!storeSessionKey(key))keySuppressed=true}finally{
+    url.searchParams.delete("key");
+    history.replaceState(null,"",url.pathname+url.search+url.hash);
+  }
+}
+captureUrlKey();
+function getKey(){return keySuppressed?null:(readSessionKey()||readPanelKey())}
+function showAuth(){document.getElementById("authBox").style.display="block"}
+function hideAuth(){document.getElementById("authBox").style.display="none"}
+
+let activeGroup="all";
+let state={models:[],groups:{},overlay:{overlay:{hide:[],order:[],add:[]}}};
+let loginState=null;
+
+document.getElementById("apiPath").textContent=API;
+function log(msg){document.getElementById("status").textContent=msg||""}
+function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function headers(){const k=getKey();return k?{"Authorization":"Bearer "+k}:{}}
+async function api(path,opts={}){
+  const res=await fetch(API+path,{credentials:"omit",...opts,headers:{"Content-Type":"application/json",...headers(),...(opts.headers||{})}});
+  const text=await res.text();
+  let payload={};try{payload=text?JSON.parse(text):{}}catch{payload={error:text}}
+  if(!res.ok){
+    if(res.status===401||res.status===403)showAuth();
+    throw new Error(payload.error||("HTTP "+res.status));
+  }
+  return payload;
+}
+function hidden(id){return (state.overlay.overlay.hide||[]).includes(id)}
+function modelGroup(m){
+  const g=m.group;
+  if(g)return g;
+  const id=m.id||"";
+  if(id.startsWith("cline-pass/"))return "pass";
+  if(id.startsWith("cline-free/")||id.endsWith(":free"))return "free";
+  if(id.startsWith("cline-cloud/"))return "cloud";
+  return "default";
+}
+function renderGroups(){
+  const counts={};
+  (state.models||[]).forEach(m=>{const g=modelGroup(m);counts[g]=(counts[g]||0)+1});
+  const groups=[["all","全部",state.models.length],["pass","ClinePass",counts.clinepass||0],["free","Free",counts.free||0],["default","Recommended",counts.default||0],["cloud","Cloud",counts.clinecloud||0]];
+  document.getElementById("groups").innerHTML=groups.filter(g=>g[2]>0||g[0]==="all").map(([id,label,n])=>`<button class="tag ${activeGroup===id?"active":""}" data-group="${id}">${label} · ${n}</button>`).join("");
+  document.querySelectorAll("[data-group]").forEach(btn=>btn.onclick=()=>{activeGroup=btn.dataset.group;render()});
+}
+function renderModels(){
+  const models=(state.models||[]).filter(m=>activeGroup==="all"||modelGroup(m)===activeGroup);
+  const el=document.getElementById("models");
+  if(!models.length){el.innerHTML='<div class="empty">没有模型</div>';return}
+  el.innerHTML=`<div class="rows">${models.map(m=>`<div class="row ${hidden(m.id)?"hidden":""}">
+    <span class="id" title="${esc(m.id)}">${esc(m.DisplayName||m.Name||m.id)}<br><small>${esc(m.id)}</small></span>
+    <span class="name">${esc(m.Description||"")}</span>
+    <button class="sec" data-act="${hidden(m.id)?"restore":"hide"}" data-id="${esc(m.id)}">${hidden(m.id)?"恢复":"隐藏"}</button>
+  </div>`).join("")}</div>`;
+  el.querySelectorAll("button[data-act]").forEach(btn=>btn.onclick=()=>mutate(btn.dataset.act,btn.dataset.id));
+}
+function renderAccounts(accounts){
+  const el=document.getElementById("accounts");
+  if(!accounts||!accounts.length){el.innerHTML='<div class="empty">还没有 Cline OAuth 账号，点击上方“OAuth 登录”。</div>';return}
+  el.innerHTML=accounts.map(a=>{
+    const plan=a.plan_status==="active"?esc(a.plan||"ClinePass"):"未订阅";
+    const credits=a.credits?Number(a.credits).toLocaleString():"未知";
+    return `<div class="kv"><span class="k">${esc(a.label||a.email||a.id)}<br><small>${esc(a.email||"")}</small></span>
+      <span class="v">${plan}<br><small>积分 ${esc(credits)} · ${esc(a.id)}</small></span></div>`;
+  }).join("");
+}
+function render(){renderGroups();renderModels()}
+async function load(){
+  log("加载中...");
+  try{
+    const [models,accounts]=await Promise.all([api("/models"),api("/accounts")]);
+    state=models;render();renderAccounts((accounts.accounts||[]));
+    hideAuth();
+    log("已刷新");
+  }catch(e){log(e.message);document.getElementById("models").innerHTML=`<div class="err">${esc(e.message)}</div>`}
+}
+async function mutate(action,id){
+  try{
+    state=await api("/models/action",{method:"POST",body:JSON.stringify({action,id})});
+    render();log("已更新模型");
+  }catch(e){log(e.message)}
+}
+async function startLogin(){
+  try{
+    const r=await api("/oauth/start",{method:"POST",body:"{}"});
+    if(r.status!=="pending"){log(r.error||"登录启动失败");return}
+    loginState=r.state;
+    document.getElementById("loginBox").innerHTML=`<div class="login-url">在浏览器打开：<a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.url)}</a></div>`;
+    log("等待浏览器授权...");
+    pollLogin();
+  }catch(e){log(e.message)}
+}
+async function pollLogin(){
+  if(!loginState)return;
+  try{
+    const r=await api("/oauth/poll",{method:"POST",body:JSON.stringify({state:loginState})});
+    if(r.status==="pending"){setTimeout(pollLogin,2000);return}
+    if(r.status==="ok"){log("登录成功："+(r.file||""));loginState=null;await load();return}
+    loginState=null;
+    log(r.error||"登录失败");
+  }catch(e){log(e.message)}
+}
+document.getElementById("refresh").onclick=load;
+document.getElementById("login").onclick=startLogin;
+document.getElementById("keySave").onclick=async ()=>{
+  const v=document.getElementById("keyInput").value.trim();
+  if(!v)return;
+  if(!storeSessionKey(v)){log("无法保存密钥到 sessionStorage");return}
+  await load();
+};
+load();
+</script>
+</body>
+</html>

@@ -55,6 +55,47 @@ func hostAuthGetByIndex(authIndex string) ([]byte, error) {
 	return resp.JSON, nil
 }
 
+// authFileDocument is the physical credential file as CPA stores it. Rename
+// rewrites the note in place; delete asks the host to drop the whole record.
+type authFileDocument struct {
+	Name string `json:"name"`
+	JSON []byte `json:"json"`
+}
+
+// noteFromAuthFile returns the host-level note attached to a stored auth file.
+func noteFromAuthFile(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var doc struct {
+		Note string `json:"note"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Note)
+}
+
+// setAuthFileNote rewrites one auth file with note replaced, preserving every
+// other field. The host derives panel labels from this file, so a partial
+// write would silently drop credential data.
+func setAuthFileNote(name string, raw []byte, note string) error {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("decode stored auth: %w", err)
+	}
+	if note == "" {
+		delete(doc, "note")
+	} else {
+		doc["note"] = note
+	}
+	updated, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("encode stored auth: %w", err)
+	}
+	return hostAuthSaveJSON(name, updated)
+}
+
 // authFileNameFor gives each Cline account its own file so several accounts can
 // coexist under one provider.
 func authFileNameFor(sa *storedAuth) string {

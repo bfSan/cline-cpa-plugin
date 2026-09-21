@@ -39,6 +39,9 @@ button:disabled{opacity:.5;cursor:default}
 .id{font:12px ui-monospace,SFMono-Regular,monospace;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .name{font-size:12px;color:var(--mut);max-width:28%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row button{padding:5px 8px;font-size:12px}
+.acts{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+button.mini{padding:4px 9px;font-size:12px;background:var(--surface);color:var(--fg);border:1px solid var(--border)}
+button.mini.danger{background:var(--err);border-color:var(--err);color:#fff}
 .empty,.err{padding:12px;border:1px dashed var(--border);border-radius:var(--radius);color:var(--mut)}
 .err{color:var(--err);border-color:var(--err)}
 .login-url{font:12px ui-monospace,SFMono-Regular,monospace;word-break:break-all;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-top:10px}
@@ -178,9 +181,37 @@ function renderAccounts(accounts){
   el.innerHTML=accounts.map(a=>{
     const plan=a.plan_status==="active"?esc(a.plan||"ClinePass"):"未订阅";
     const credits=a.credits?Number(a.credits).toLocaleString():"未知";
-    return `<div class="kv"><span class="k">${esc(a.label||a.email||a.id)}<br><small>${esc(a.email||"")}</small></span>
-      <span class="v">${plan}<br><small>积分 ${esc(credits)} · ${esc(a.id)}</small></span></div>`;
+    const name=esc(a.note||a.label||a.email||a.id);
+    return `<div class="kv"><span class="k">${name}<br><small>${esc(a.email||"")}${a.note&&a.note!==a.label?` · ${esc(a.file||"")}`:""}</small></span>
+      <span class="v">${plan}<br><small>积分 ${esc(credits)}</small>
+      <span class="acts">
+        <button class="mini" data-act="rename" data-id="${esc(a.id)}" data-name="${esc(a.note||a.label||a.email||"")}">重命名</button>
+        <button class="mini danger" data-act="delete" data-id="${esc(a.id)}" data-name="${esc(a.note||a.label||a.email||a.id)}">删除</button>
+      </span></span></div>`;
   }).join("");
+  el.querySelectorAll("button[data-act]").forEach(b=>{
+    b.onclick=()=>{b.dataset.act==="rename"?renameAccount(b.dataset.id,b.dataset.name):deleteAccount(b.dataset.id,b.dataset.name)};
+  });
+}
+async function renameAccount(id,current){
+  const name=(prompt("账号显示名：",current||"")||"").trim();
+  if(name===current){return}
+  try{
+    const r=await api("/accounts/rename",{method:"POST",body:JSON.stringify({id,name})});
+    if(r.status!=="ok"){log(r.error||"重命名失败");return}
+    log("已重命名");await load();
+  }catch(e){log(e.message)}
+}
+async function deleteAccount(id,name){
+  if(!confirm(`删除账号「${name}」？凭证会被移除，可以在面板重新登录。`))return;
+  try{
+    const r=await api("/accounts/delete",{method:"POST",body:JSON.stringify({id})});
+    if(r.status!=="ok"){log(r.error||"删除失败");return}
+    // The plugin has no host delete primitive, so the panel calls CPA directly.
+    const res=await fetch(r.url,{method:r.method||"DELETE",credentials:"omit",headers:{...headers()}});
+    if(!res.ok){log("删除失败：CPA 返回 "+res.status);return}
+    log("已删除，可重新登录");await load();
+  }catch(e){log(e.message)}
 }
 function render(){renderGroups();renderModels()}
 async function load(){

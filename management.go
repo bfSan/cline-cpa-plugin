@@ -4,7 +4,9 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -86,6 +88,8 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/accounts", Description: "List Cline accounts and subscription status."},
 			{Method: http.MethodPost, Path: base + "/oauth/start", Description: "Start a Cline WorkOS device login."},
 			{Method: http.MethodPost, Path: base + "/oauth/poll", Description: "Poll a Cline WorkOS device login."},
+			{Method: http.MethodPost, Path: base + "/accounts/rename", Description: "Rename one account (body: {id, name})."},
+			{Method: http.MethodPost, Path: base + "/accounts/delete", Description: "Delete one account (body: {id})."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "Cline", Description: "Cline/ClinePass account and model dashboard."},
@@ -134,6 +138,10 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, managementOAuthStart(req.ManagementRequest)))
 	case req.Method == http.MethodPost && path == base+"/oauth/poll":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, managementOAuthPoll(req.ManagementRequest)))
+	case req.Method == http.MethodPost && path == base+"/accounts/rename":
+		return okEnvelope(handleAccountRename(req.Body))
+	case req.Method == http.MethodPost && path == base+"/accounts/delete":
+		return okEnvelope(handleAccountDelete(req.Body))
 	default:
 		return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 	}
@@ -191,6 +199,89 @@ func managementOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
 		}
 		return map[string]any{"status": "error", "error": message}
 	}
+}
+
+// handleAccountRename stores a display name for one credential. The name lives
+// in the auth file's host-level note, which is what CPA renders in the auth
+// card, so the rename survives reloads without touching the credential itself.
+func handleAccountRename(body []byte) pluginapi.ManagementResponse {
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "invalid body"})
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
+		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "id is required"})
+	}
+	file, raw, err := findOwnAuthFile(req.ID)
+	if err != nil {
+		return mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": err.Error()})
+	}
+	sa, err := parseStored(raw)
+	if err != nil {
+		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "stored auth is nil"})
+	}
+	note := strings.TrimSpace(req.Name)
+	if note == "" {
+		note = firstNonEmpty(sa.Account.DisplayName, sa.Account.Email, providerName)
+	}
+	if err := setAuthFileNote(file.Name, raw, note); err != nil {
+		return mgmtJSONResponse(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	}
+	return mgmtJSONResponse(http.StatusOK, map[string]any{"status": "ok", "file": file.Name, "note": note})
+}
+
+// handleAccountDelete removes one credential. The plugin SDK has no auth.delete
+// method, so this returns the host's own auth-files route for the panel to
+// call; the panel is same-origin with CPA and already holds the management key.
+func handleAccountDelete(body []byte) pluginapi.ManagementResponse {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "invalid body"})
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
+		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "id is required"})
+	}
+	file, _, err := findOwnAuthFile(req.ID)
+	if err != nil {
+		return mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": err.Error()})
+	}
+	return mgmtJSONResponse(http.StatusOK, map[string]any{
+		"status":  "ok",
+		"file":    file.Name,
+		"method":  http.MethodDelete,
+		"url":     loadedManagementBasePath() + "/auth-files?name=" + url.QueryEscape(file.Name),
+		"message": "credential removed; re-login from the panel to add it back",
+	})
+}
+
+// findOwnAuthFile resolves an auth index belonging to this provider and returns
+// both the file entry and its raw JSON.
+func findOwnAuthFile(authIndex string) (hostAuthFileEntry, []byte, error) {
+	files, err := hostAuthListFiles()
+	if err != nil {
+		return hostAuthFileEntry{}, nil, fmt.Errorf("host auth list unavailable")
+	}
+	for _, file := range files {
+		if !strings.EqualFold(strings.TrimSpace(file.AuthIndex), authIndex) {
+			continue
+		}
+		if !isOwnAuthFile(file.Name) {
+			return hostAuthFileEntry{}, nil, fmt.Errorf("auth %s does not belong to %s", authIndex, providerName)
+		}
+		raw, err := hostAuthGetByIndex(file.AuthIndex)
+		if err != nil {
+			return hostAuthFileEntry{}, nil, fmt.Errorf("host auth get failed")
+		}
+		return file, raw, nil
+	}
+	return hostAuthFileEntry{}, nil, fmt.Errorf("auth %s not found", authIndex)
 }
 
 type modelCatalogResponseWire struct {
@@ -327,7 +418,26 @@ type accountSummaryEntry struct {
 	PlanStatus  string `json:"plan_status,omitempty"`
 	Credit      string `json:"credits,omitempty"`
 	LastChecked string `json:"last_checked,omitempty"`
+	File        string `json:"file,omitempty"`
+	Note        string `json:"note,omitempty"`
 }
+
+// isOwnAuthFile reports whether an auth file belongs to this provider. Files
+// are named "<provider>-<account>.json", with the legacy "cline.json" kept for
+// single-account installs.
+func isOwnAuthFile(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	if name == authFileName {
+		return true
+	}
+	return strings.HasPrefix(name, providerName+"-")
+}
+
+// storedNote pulls the host-level note out of a stored auth file.
+func storedNote(raw []byte) string { return noteFromAuthFile(raw) }
 
 func accountSummary() accountSummaryWire {
 	files, err := hostAuthListFiles()
@@ -336,8 +446,7 @@ func accountSummary() accountSummaryWire {
 	}
 	result := accountSummaryWire{}
 	for _, file := range files {
-		if !strings.EqualFold(strings.TrimSpace(file.Name), authFileName) &&
-			!strings.HasPrefix(strings.ToLower(strings.TrimSpace(file.Name)), providerName+"-") {
+		if !isOwnAuthFile(file.Name) {
 			continue
 		}
 		raw, err := hostAuthGetByIndex(file.AuthIndex)
@@ -355,6 +464,8 @@ func accountSummary() accountSummaryWire {
 			Plan:        sa.Account.Plan,
 			PlanStatus:  sa.Account.PlanStatus,
 			LastChecked: time.Now().UTC().Format(time.RFC3339),
+			File:        strings.TrimSpace(file.Name),
+			Note:        storedNote(raw),
 		})
 	}
 	return result

@@ -567,4 +567,7 @@ func TestBuildAuthFileJSONKeepsHostMetadata(t *testing.T) {
 	if _, ok := parsed["auth"]; !ok {
 		t.Fatalf("auth block missing: %s", raw)
 	}
+	if parsed["label"] != "user@example.com" {
+		t.Fatalf("label = %v, want user@example.com", parsed["label"])
+	}
 }

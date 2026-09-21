@@ -124,11 +124,21 @@ func setAuthFileNote(name string, raw []byte, note string) error {
 	} else {
 		doc["note"] = note
 	}
+	if account, ok := doc["account"].(map[string]any); ok {
+		if label := firstNonEmpty(stringValue(account["displayName"]), stringValue(account["email"])); label != "" {
+			doc["label"] = label
+		}
+	}
 	updated, err := json.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("encode stored auth: %w", err)
 	}
 	return hostAuthSaveJSON(name, updated)
+}
+
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
 }
 
 // authFileNameFor gives each Cline account its own file so several accounts can
@@ -185,10 +195,27 @@ func buildAuthFileJSON(sa *storedAuth) ([]byte, error) {
 		"type":     providerName,
 		"provider": providerName,
 		"disabled": false,
+		"label":    clineAccountLabel(sa),
 		"auth":     nested["auth"],
 		"account":  nested["account"],
 	}
 	return json.Marshal(out)
+}
+
+// clineAccountLabel mirrors the label CPA shows for a Cline credential. It is
+// persisted at the physical-file top level because FileTokenStore.labelFor
+// reads that map, not the nested account record.
+func clineAccountLabel(sa *storedAuth) string {
+	if sa == nil {
+		return providerName
+	}
+	if label := strings.TrimSpace(sa.Account.DisplayName); label != "" {
+		return label
+	}
+	if label := strings.TrimSpace(sa.Account.Email); label != "" {
+		return label
+	}
+	return providerName
 }
 
 // persistAuthData writes an auth produced by the OAuth flow to the host auth

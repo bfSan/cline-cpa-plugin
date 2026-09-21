@@ -441,5 +441,8 @@ func credentialFailure(err error) error {
 		}
 		return &upstreamStatusError{status: http.StatusServiceUnavailable, message: credErr.message}
 	}
-	return fmt.Errorf("cline credential refresh failed: %v", err)
+	// A refresh transport failure says nothing about the credential itself.
+	// Keep it status-less and use the lifecycle wording CPA recognizes so the
+	// host does not turn a transient network fault into a model/auth cooldown.
+	return fmt.Errorf("cline credential refresh failed (unexpected EOF): %w", err)
 }

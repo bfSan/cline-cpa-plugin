@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -766,6 +768,17 @@ func TestCredentialFailureStatuses(t *testing.T) {
 	}
 }
 
+func TestCredentialFailureTransportErrorsAreConnectionLifecycleFailures(t *testing.T) {
+	err := credentialFailure(context.DeadlineExceeded)
+	var statusError interface{ StatusCode() int }
+	if errors.As(err, &statusError) {
+		t.Fatalf("transport refresh failure must not carry an HTTP status: %+v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unexpected eof") {
+		t.Fatalf("transport refresh failure must carry CPA lifecycle wording: %q", err.Error())
+	}
+}
+
 // Persisting must not rewrite the host-owned fields: an account the management
 // UI disabled would otherwise come back to life on the next refresh.
 func TestCredentialPersistKeepsHostOwnedFields(t *testing.T) {
@@ -843,6 +856,19 @@ func TestManagementServesPanelHTML(t *testing.T) {
 	}
 	if strings.Contains(string(resp.Body), "积分") || strings.Contains(string(resp.Body), "credits") {
 		t.Fatal("ClinePass uses quota semantics and must not expose credit fields")
+	}
+	for _, rule := range []string{
+		"html,body{max-width:100%;overflow-x:hidden}",
+		".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:14px}",
+		".card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px}",
+		".actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}",
+		"@media (max-width:640px)",
+		".wrap{padding:18px 12px}",
+		".filter-bar .field-input{flex:1 1 100%;width:100%}",
+	} {
+		if !strings.Contains(string(resp.Body), rule) {
+			t.Fatalf("panel html is missing shared layout rule %q", rule)
+		}
 	}
 }
 

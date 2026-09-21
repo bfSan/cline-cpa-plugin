@@ -45,6 +45,7 @@
   color-scheme:dark
 }
 *{box-sizing:border-box}
+html,body{max-width:100%;overflow-x:hidden}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:1100px;margin:0 auto;padding:24px 16px}
 h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bottom:20px}
@@ -52,8 +53,8 @@ h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);font-size:13px;margin-bot
 button{background:var(--acc);color:var(--on-acc);border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px;white-space:nowrap}
 button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background:var(--btn-sec-hover)}button:disabled{opacity:.5;cursor:default}
 .toggle{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
-.card,.summary{background:var(--card);border:1px solid var(--border);border-radius:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr));gap:14px}
+.card,.summary{min-width:0;background:var(--card);border:1px solid var(--border);border-radius:12px}
 .card{padding:16px}
 .card h2{font-size:15px;margin:0 0 2px;display:flex;justify-content:space-between;align-items:center;gap:8px}
 .uid{color:var(--mut);font-size:11px;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:12px}
@@ -74,7 +75,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .row:first-of-type{border-top:0}.k{color:var(--mut)}.v{font-weight:600;text-align:right;overflow-wrap:anywhere}
 .v.ok{color:var(--ok)}.v.warn{color:var(--warn)}.v.err{color:var(--err)}
 .actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
-.field-input{flex:1;min-width:0;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
+.field-input{flex:1;min-width:0;max-width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--fg)}
 .toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:9999;max-width:360px}
 .toast{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--acc);border-radius:var(--radius-md);padding:14px 18px;font-size:13px;box-shadow:var(--toast-shadow);transform:translateX(120%);opacity:0;transition:transform .3s cubic-bezier(.2,.9,.3,1.1),opacity .25s;cursor:pointer;word-break:break-all}
 .toast.show{transform:translateX(0);opacity:1}
@@ -117,6 +118,11 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 .filter-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
 @media (max-width:640px){
   .wrap{padding:18px 12px}
+  .bar,.filter-bar,.actions,.oauth-url-row{min-width:0}
+  .bar>*{max-width:100%}
+  .filter-bar .field-input{flex:1 1 100%;width:100%}
+  #modelBox h2{align-items:flex-start;flex-wrap:wrap}
+  #modelBox h2>span{max-width:100%;flex-wrap:wrap}
   .model-name{display:none}
   .model-row{align-items:flex-start;flex-wrap:wrap}
   .model-actions{margin-left:auto}

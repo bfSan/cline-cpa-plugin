@@ -309,6 +309,33 @@ func TestExecutorNonEntitlementErrorKeepsStatus(t *testing.T) {
 	}
 }
 
+// Cline answers 500 `empty response content` when the request leaves no room
+// for a reply (reasoning models whose max_tokens is consumed by the reasoning
+// phase). CPA cools credentials on 5xx, so one bad request must not be able to
+// take the whole account out of rotation: report it as a 400 client fault.
+func TestEmptyContentErrorIsReportedAsClientFault(t *testing.T) {
+	err := clineUpstreamError(http.StatusInternalServerError, []byte(`{"error":"empty response content","success":false}`))
+	statusErr, ok := err.(*upstreamStatusError)
+	if !ok {
+		t.Fatalf("error type = %T, want *upstreamStatusError", err)
+	}
+	if statusErr.status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (5xx would cool the credential)", statusErr.status)
+	}
+	if !strings.Contains(statusErr.message, "max_tokens") {
+		t.Fatalf("message should hint at the cause, got %q", statusErr.message)
+	}
+}
+
+// A genuine upstream outage must still surface as 5xx so CPA can rotate.
+func TestRealServerErrorKeeps5xxStatus(t *testing.T) {
+	err := clineUpstreamError(http.StatusBadGateway, []byte(`bad gateway`))
+	statusErr, ok := err.(*upstreamStatusError)
+	if !ok || statusErr.status != http.StatusBadGateway {
+		t.Fatalf("status = %+v, want 502", err)
+	}
+}
+
 // The host only honours the top-level "error" field of host.stream.emit, and
 // only text containing "unexpected eof" is classified as a connection
 // lifecycle event that skips credential cooldown. Both properties are asserted

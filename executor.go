@@ -40,10 +40,28 @@ func clineUpstreamError(status int, body []byte) error {
 			message: "ClinePass subscription is not active for this account; subscribe or use a free model",
 		}
 	}
+	// Cline answers 500 `empty response content` when the request itself leaves
+	// no room for a reply — observed with reasoning models where max_tokens is
+	// consumed by the reasoning phase, so the visible content comes back empty.
+	// That is a client-side parameter problem, not an upstream outage, and CPA
+	// cools credentials down on 5xx. Report 400 so one bad request cannot take
+	// the whole account out of rotation.
+	if isEmptyContentError(message) {
+		return &upstreamStatusError{
+			status:  http.StatusBadRequest,
+			message: "upstream produced no content: " + truncate(message, 200) + " (try a larger max_tokens)",
+		}
+	}
 	return &upstreamStatusError{
 		status:  status,
 		message: fmt.Sprintf("upstream %d: %s", status, truncate(message, 240)),
 	}
+}
+
+// isEmptyContentError matches Cline's "the request produced nothing" body.
+func isEmptyContentError(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "empty response content")
 }
 
 func resolveUpstreamModel(model string) string {

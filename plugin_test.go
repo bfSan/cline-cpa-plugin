@@ -236,6 +236,47 @@ func TestConfigHiddenModelsSeedOverlay(t *testing.T) {
 	}
 }
 
+func TestModelForAuthAppliesHiddenModels(t *testing.T) {
+	restore := setModelOverlayForTest(modelOverlay{Hide: []string{"cline-pass/glm-5.3"}})
+	defer restore()
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"free":[{"id":"cline-free/kimi-k3","name":"Kimi K3"}],
+			"clinePass":[{"id":"cline-pass/glm-5.3","name":"GLM 5.3"}]
+		}`))
+	}))
+	modelCacheMu.Lock()
+	oldCache := modelCache
+	modelCache = map[string]cachedModelCatalog{}
+	modelCacheMu.Unlock()
+	t.Cleanup(func() {
+		modelCacheMu.Lock()
+		modelCache = oldCache
+		modelCacheMu.Unlock()
+	})
+
+	raw, err := handleMethod(pluginabi.MethodModelForAuth, mustJSON(t, pluginapi.AuthModelRequest{
+		AuthID:      "cline-1",
+		StorageJSON: mustJSON(t, testStoredAuth()),
+	}))
+	if err != nil {
+		t.Fatalf("handleMethod error = %v", err)
+	}
+	resp := decodeResult[pluginapi.ModelResponse](t, raw)
+	foundFree := false
+	for _, model := range resp.Models {
+		if model.ID == "cline-pass/glm-5.3" {
+			t.Fatal("hidden model leaked through the per-auth catalog")
+		}
+		if model.ID == "cline-free/kimi-k3" {
+			foundFree = true
+		}
+	}
+	if !foundFree {
+		t.Fatal("visible free model missing from the per-auth catalog")
+	}
+}
+
 func TestEnsureWorkOSPrefixIsIdempotent(t *testing.T) {
 	if got := ensureWorkOSPrefix("abc"); got != "workos:abc" {
 		t.Fatalf("ensureWorkOSPrefix = %q", got)

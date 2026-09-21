@@ -132,7 +132,10 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	// most likely to meet an expired token: an hour after login the catalog
 	// would silently drop out of the panel without this.
 	models, _, _ := modelCatalogForAuth(freshStoredAuth(sa, req.Attributes))
-	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
+	// The per-auth catalog is cached unfiltered; apply the overlay (including
+	// config hidden_models) at read time so config changes take effect
+	// without waiting out the cache TTL.
+	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: applyModelOverlay(models, loadedModelOverlay())})
 }
 
 func effectiveModelCatalog() ([]pluginapi.ModelInfo, map[string][]string) {

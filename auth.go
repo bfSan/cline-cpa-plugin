@@ -29,6 +29,7 @@ type storedAccount struct {
 	ID          string `json:"id"`
 	Email       string `json:"email,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
+	Nickname    string `json:"nickname,omitempty"`
 	Plan        string `json:"plan,omitempty"`
 	PlanStatus  string `json:"planStatus,omitempty"`
 	Balance     int64  `json:"balance,omitempty"`
@@ -416,9 +417,21 @@ func parseStored(raw []byte) (*storedAuth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
 	}
-	var direct storedAuth
+	var direct struct {
+		Auth    storedTokens  `json:"auth"`
+		Account storedAccount `json:"account"`
+		Label   string        `json:"label"`
+		Note    string        `json:"note"`
+	}
 	if err := json.Unmarshal(raw, &direct); err == nil && direct.Auth.AccessToken != "" {
-		return &direct, nil
+		sa := &storedAuth{Auth: direct.Auth, Account: direct.Account}
+		// Older plugin builds stored the custom display name only in the
+		// host-level note (or in label after changing it externally). Import
+		// that value so deployments do not silently lose a rename.
+		if strings.TrimSpace(sa.Account.Nickname) == "" {
+			sa.Account.Nickname = legacyNickname(direct.Note, direct.Label, &sa.Account)
+		}
+		return sa, nil
 	}
 	var flat struct {
 		AccessToken  string `json:"accessToken"`
@@ -426,6 +439,7 @@ func parseStored(raw []byte) (*storedAuth, error) {
 		ExpiresAt    int64  `json:"expiresAt"`
 		Email        string `json:"email"`
 		DisplayName  string `json:"displayName"`
+		Nickname     string `json:"nickname"`
 		ID           string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &flat); err != nil {
@@ -444,8 +458,23 @@ func parseStored(raw []byte) (*storedAuth, error) {
 			ID:          flat.ID,
 			Email:       flat.Email,
 			DisplayName: flat.DisplayName,
+			Nickname:    flat.Nickname,
 		},
 	}, nil
+}
+
+func legacyNickname(note, label string, account *storedAccount) string {
+	if value := strings.TrimSpace(note); value != "" {
+		return value
+	}
+	label = strings.TrimSpace(label)
+	if label == "" || account == nil {
+		return ""
+	}
+	if label == strings.TrimSpace(account.DisplayName) || label == strings.TrimSpace(account.Email) {
+		return ""
+	}
+	return label
 }
 
 func authDataFromStored(id string, sa *storedAuth) pluginapi.AuthData {
@@ -453,16 +482,13 @@ func authDataFromStored(id string, sa *storedAuth) pluginapi.AuthData {
 	if strings.TrimSpace(id) == "" {
 		id = authFileName
 	}
-	label := strings.TrimSpace(sa.Account.DisplayName)
-	if label == "" {
-		label = strings.TrimSpace(sa.Account.Email)
-	}
-	if label == "" {
-		label = providerName
-	}
+	label := clineAccountLabel(sa)
 	metadata := map[string]any{}
 	if sa.Account.Email != "" {
 		metadata["email"] = sa.Account.Email
+	}
+	if sa.Account.Nickname != "" {
+		metadata["nickname"] = sa.Account.Nickname
 	}
 	if sa.Account.DisplayName != "" {
 		metadata["display_name"] = sa.Account.DisplayName

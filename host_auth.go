@@ -111,27 +111,43 @@ func noteFromAuthFile(raw []byte) string {
 	return strings.TrimSpace(doc.Note)
 }
 
-// setAuthFileNote rewrites one auth file with note replaced, preserving every
-// other field. The host derives panel labels from this file, so a partial
-// write would silently drop credential data.
-func setAuthFileNote(name string, raw []byte, note string) error {
+// rewriteAuthFileNickname updates both label sources CPA can display: the
+// top-level label used by the native auth list and account.nickname used by
+// this plugin. The legacy note is removed because older builds wrote the
+// custom name there, which made the two surfaces disagree.
+func rewriteAuthFileNickname(raw []byte, nickname string) ([]byte, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("decode stored auth: %w", err)
+		return nil, fmt.Errorf("decode stored auth: %w", err)
 	}
-	if note == "" {
-		delete(doc, "note")
+	nickname = strings.TrimSpace(nickname)
+	delete(doc, "note")
+	account, _ := doc["account"].(map[string]any)
+	if account == nil {
+		account = map[string]any{}
+		doc["account"] = account
+	}
+	if nickname != "" {
+		account["nickname"] = nickname
+		doc["label"] = nickname
 	} else {
-		doc["note"] = note
-	}
-	if account, ok := doc["account"].(map[string]any); ok {
-		if label := firstNonEmpty(stringValue(account["displayName"]), stringValue(account["email"])); label != "" {
-			doc["label"] = label
-		}
+		delete(account, "nickname")
+		label := firstNonEmpty(stringValue(account["displayName"]), stringValue(account["email"]), providerName)
+		doc["label"] = label
 	}
 	updated, err := json.Marshal(doc)
 	if err != nil {
-		return fmt.Errorf("encode stored auth: %w", err)
+		return nil, fmt.Errorf("encode stored auth: %w", err)
+	}
+	return updated, nil
+}
+
+// setAuthFileNickname persists one custom display name without dropping any
+// credential fields.
+func setAuthFileNickname(name string, raw []byte, nickname string) error {
+	updated, err := rewriteAuthFileNickname(raw, nickname)
+	if err != nil {
+		return err
 	}
 	return hostAuthSaveJSON(name, updated)
 }
@@ -208,6 +224,9 @@ func buildAuthFileJSON(sa *storedAuth) ([]byte, error) {
 func clineAccountLabel(sa *storedAuth) string {
 	if sa == nil {
 		return providerName
+	}
+	if label := strings.TrimSpace(sa.Account.Nickname); label != "" {
+		return label
 	}
 	if label := strings.TrimSpace(sa.Account.DisplayName); label != "" {
 		return label

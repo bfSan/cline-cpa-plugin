@@ -201,9 +201,9 @@ func managementOAuthPoll(req pluginapi.ManagementRequest) map[string]any {
 	}
 }
 
-// handleAccountRename stores a display name for one credential. The name lives
-// in the auth file's host-level note, which is what CPA renders in the auth
-// card, so the rename survives reloads without touching the credential itself.
+// handleAccountRename stores a display name for one credential. The value is
+// persisted under account.nickname and mirrored to the top-level label, which
+// is the field CPA's native auth list renders.
 func handleAccountRename(body []byte) pluginapi.ManagementResponse {
 	var req struct {
 		ID   string `json:"id"`
@@ -224,14 +224,18 @@ func handleAccountRename(body []byte) pluginapi.ManagementResponse {
 	if err != nil {
 		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": "stored auth is nil"})
 	}
-	note := strings.TrimSpace(req.Name)
-	if note == "" {
-		note = firstNonEmpty(sa.Account.DisplayName, sa.Account.Email, providerName)
+	nickname := strings.TrimSpace(req.Name)
+	if nickname == "" {
+		nickname = firstNonEmpty(sa.Account.DisplayName, sa.Account.Email, providerName)
 	}
-	if err := setAuthFileNote(effectiveAuthName(file), raw, note); err != nil {
+	if err := setAuthFileNickname(effectiveAuthName(file), raw, nickname); err != nil {
 		return mgmtJSONResponse(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 	}
-	return mgmtJSONResponse(http.StatusOK, map[string]any{"status": "ok", "file": effectiveAuthName(file), "note": note})
+	return mgmtJSONResponse(http.StatusOK, map[string]any{
+		"status":   "ok",
+		"file":     effectiveAuthName(file),
+		"nickname": nickname,
+	})
 }
 
 // handleAccountDelete removes one credential. The plugin SDK has no auth.delete
@@ -413,6 +417,7 @@ type accountSummaryWire struct {
 type accountSummaryEntry struct {
 	ID          string `json:"id"`
 	Label       string `json:"label"`
+	Nickname    string `json:"nickname,omitempty"`
 	Email       string `json:"email,omitempty"`
 	Plan        string `json:"plan,omitempty"`
 	PlanStatus  string `json:"plan_status,omitempty"`
@@ -469,7 +474,8 @@ func accountSummary() accountSummaryWire {
 		}
 		result.Accounts = append(result.Accounts, accountSummaryEntry{
 			ID:          file.AuthIndex,
-			Label:       firstNonEmpty(sa.Account.DisplayName, sa.Account.Email, providerName),
+			Label:       clineAccountLabel(sa),
+			Nickname:    sa.Account.Nickname,
 			Email:       sa.Account.Email,
 			Plan:        sa.Account.Plan,
 			PlanStatus:  sa.Account.PlanStatus,

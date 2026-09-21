@@ -571,3 +571,82 @@ func TestBuildAuthFileJSONKeepsHostMetadata(t *testing.T) {
 		t.Fatalf("label = %v, want user@example.com", parsed["label"])
 	}
 }
+
+func TestAuthFileNicknameRewriteUpdatesLabelAndNestedAccount(t *testing.T) {
+	raw := mustJSON(t, map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"label":    "old@example.com",
+		"note":     "old note",
+		"auth":     map[string]any{"accessToken": "token"},
+		"account": map[string]any{
+			"id":          "usr-1",
+			"email":       "old@example.com",
+			"displayName": "Old User",
+		},
+	})
+	updated, err := rewriteAuthFileNickname(raw, "新昵称")
+	if err != nil {
+		t.Fatalf("rewriteAuthFileNickname error = %v", err)
+	}
+	var parsed struct {
+		Label   string         `json:"label"`
+		Note    string         `json:"note"`
+		Account map[string]any `json:"account"`
+	}
+	if err := json.Unmarshal(updated, &parsed); err != nil {
+		t.Fatalf("decode rewritten auth: %v", err)
+	}
+	if parsed.Label != "新昵称" {
+		t.Fatalf("label = %q, want 新昵称", parsed.Label)
+	}
+	if got := stringValue(parsed.Account["nickname"]); got != "新昵称" {
+		t.Fatalf("account.nickname = %q, want 新昵称", got)
+	}
+	if parsed.Note != "" {
+		t.Fatalf("legacy note = %q, want removed", parsed.Note)
+	}
+}
+
+func TestBuildAuthFileJSONPrefersNicknameForLabel(t *testing.T) {
+	sa := testStoredAuth()
+	sa.Account.DisplayName = "Old User"
+	sa.Account.Nickname = "新昵称"
+	raw, err := buildAuthFileJSON(sa)
+	if err != nil {
+		t.Fatalf("buildAuthFileJSON error = %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if parsed["label"] != "新昵称" {
+		t.Fatalf("label = %v, want 新昵称", parsed["label"])
+	}
+	account, _ := parsed["account"].(map[string]any)
+	if got := stringValue(account["nickname"]); got != "新昵称" {
+		t.Fatalf("account.nickname = %q, want 新昵称", got)
+	}
+}
+
+func TestParseStoredMigratesLegacyNoteToNickname(t *testing.T) {
+	raw := mustJSON(t, map[string]any{
+		"type":     providerName,
+		"provider": providerName,
+		"label":    "Old User",
+		"note":     "legacy rename",
+		"auth":     map[string]any{"accessToken": "token"},
+		"account": map[string]any{
+			"id":          "usr-1",
+			"email":       "old@example.com",
+			"displayName": "Old User",
+		},
+	})
+	sa, err := parseStored(raw)
+	if err != nil {
+		t.Fatalf("parseStored error = %v", err)
+	}
+	if sa.Account.Nickname != "legacy rename" {
+		t.Fatalf("nickname = %q, want legacy rename", sa.Account.Nickname)
+	}
+}

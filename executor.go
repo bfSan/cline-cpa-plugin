@@ -72,6 +72,32 @@ func resolveUpstreamModel(model string) string {
 	return model
 }
 
+// normalizeUpstreamResponse flattens Cline's non-streaming envelope. The
+// chat/completions endpoint returns {"data":{"choices":...}} while OpenAI
+// compatible CPA clients expect choices at the top level. Streaming responses
+// are already emitted as standard chat.completion.chunk frames.
+func normalizeUpstreamResponse(body []byte) []byte {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Data) == 0 {
+		return body
+	}
+	var direct struct {
+		Choices json.RawMessage `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &direct); err == nil && len(direct.Choices) > 0 {
+		return body
+	}
+	var nested struct {
+		Choices json.RawMessage `json:"choices"`
+	}
+	if err := json.Unmarshal(envelope.Data, &nested); err != nil || len(nested.Choices) == 0 {
+		return body
+	}
+	return envelope.Data
+}
+
 func newUpstreamChatRequest(payload []byte, sa *storedAuth, model string) (*http.Request, error) {
 	if sa == nil {
 		return nil, fmt.Errorf("stored auth is nil")
@@ -136,7 +162,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		}
 		return errorEnvelopeWithStatus("http_error", upstreamErr.Error(), status), nil
 	}
-	return okEnvelope(pluginapi.ExecutorResponse{Payload: body})
+	return okEnvelope(pluginapi.ExecutorResponse{Payload: normalizeUpstreamResponse(body)})
 }
 
 type executorStreamRequest struct {

@@ -429,6 +429,38 @@ func TestExecuteStreamForwardsEntitlementStatus(t *testing.T) {
 	}
 }
 
+func TestExecuteUnwrapsClineNonStreamingDataEnvelope(t *testing.T) {
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"choices":[{"message":{"content":"OK"}}]}}`))
+	}))
+	raw, err := handleMethod(pluginabi.MethodExecutorExecute, mustJSON(t, pluginapi.ExecutorRequest{
+		Model:        "cline-free/kimi-k3",
+		StorageJSON:  mustJSON(t, testStoredAuth()),
+		Payload:      []byte(`{"model":"cline-free/kimi-k3","messages":[]}`),
+		AuthProvider: providerName,
+	}))
+	if err != nil {
+		t.Fatalf("handleMethod error = %v", err)
+	}
+	resp := decodeResult[pluginapi.ExecutorResponse](t, raw)
+	var parsed struct {
+		Choices []json.RawMessage `json:"choices"`
+	}
+	if err := json.Unmarshal(resp.Payload, &parsed); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(parsed.Choices) != 1 {
+		t.Fatalf("payload has %d top-level choices, want 1: %s", len(parsed.Choices), resp.Payload)
+	}
+}
+
+func TestNormalizeUpstreamResponseKeepsPlainPayload(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"content":"OK"}}]}`)
+	if got := normalizeUpstreamResponse(body); string(got) != string(body) {
+		t.Fatalf("plain payload changed: %s", got)
+	}
+}
+
 func TestManagementRegisterDeclaresRoutesAndPanel(t *testing.T) {
 	resp := callMethod[managementRegistrationResponse](t, pluginabi.MethodManagementRegister, mustJSON(t, pluginapi.ManagementRegistrationRequest{
 		BasePath:         "/v0/management",

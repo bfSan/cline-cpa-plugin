@@ -24,6 +24,9 @@ button.sec{background:var(--surface);color:var(--fg);border:1px solid var(--bord
 button.danger{background:var(--err);color:#fff}
 button:disabled{opacity:.5;cursor:default}
 .status{margin-left:auto;color:var(--mut);font-size:12px}
+.status.busy{color:var(--warn)}
+.status.ok{color:var(--ok)}
+.status.bad{color:var(--err)}
 .panels{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:16px}
 @media (max-width:820px){.panels{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
@@ -134,8 +137,8 @@ let state={models:[],groups:{},overlay:{overlay:{hide:[],order:[],add:[]}}};
 let loginState=null;
 
 document.getElementById("apiPath").textContent=API;
-function log(msg){document.getElementById("status").textContent=msg||""}
 function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function setStatus(msg,kind){const el=document.getElementById("status");el.textContent=msg||"";el.className="status"+(kind?" "+kind:"")}
 function headers(){const k=getKey();return k?{"Authorization":"Bearer "+k}:{}}
 async function api(path,opts={}){
   const res=await fetch(API+path,{credentials:"omit",...opts,headers:{"Content-Type":"application/json",...headers(),...(opts.headers||{})}});
@@ -160,7 +163,7 @@ function modelGroup(m){
 function renderGroups(){
   const counts={};
   (state.models||[]).forEach(m=>{const g=modelGroup(m);counts[g]=(counts[g]||0)+1});
-  const groups=[["all","全部",state.models.length],["pass","ClinePass",counts.clinepass||0],["free","Free",counts.free||0],["default","Recommended",counts.default||0],["cloud","Cloud",counts.clinecloud||0]];
+  const groups=[["all","全部",(state.models||[]).length],["clinepass","ClinePass",counts.clinepass||0],["free","Free",counts.free||0],["default","Recommended",counts.default||0],["clinecloud","Cloud",counts.clinecloud||0]];
   document.getElementById("groups").innerHTML=groups.filter(g=>g[2]>0||g[0]==="all").map(([id,label,n])=>`<button class="tag ${activeGroup===id?"active":""}" data-group="${id}">${label} · ${n}</button>`).join("");
   document.querySelectorAll("[data-group]").forEach(btn=>btn.onclick=()=>{activeGroup=btn.dataset.group;render()});
 }
@@ -181,8 +184,9 @@ function renderAccounts(accounts){
   el.innerHTML=accounts.map(a=>{
     const plan=a.plan_status==="active"?esc(a.plan||"ClinePass"):"未订阅";
     const credits=a.credits?Number(a.credits).toLocaleString():"未知";
-    const name=esc(a.note||a.label||a.email||a.id);
-    return `<div class="kv"><span class="k">${name}<br><small>${esc(a.email||"")}${a.note&&a.note!==a.label?` · ${esc(a.file||"")}`:""}</small></span>
+    const title=esc(a.note||a.label||a.email||a.id);
+    const meta=[a.email,a.file].filter(Boolean).join(" · ");
+    return `<div class="kv"><span class="k">${title}<br><small>${esc(meta)}</small></span>
       <span class="v">${plan}<br><small>积分 ${esc(credits)}</small>
       <span class="acts">
         <button class="mini" data-act="rename" data-id="${esc(a.id)}" data-name="${esc(a.note||a.label||a.email||"")}">重命名</button>
@@ -196,65 +200,69 @@ function renderAccounts(accounts){
 async function renameAccount(id,current){
   const name=(prompt("账号显示名：",current||"")||"").trim();
   if(name===current){return}
+  setStatus("正在重命名...","busy");
   try{
     const r=await api("/accounts/rename",{method:"POST",body:JSON.stringify({id,name})});
-    if(r.status!=="ok"){log(r.error||"重命名失败");return}
-    log("已重命名");await load();
-  }catch(e){log(e.message)}
+    if(r.status!=="ok"){setStatus(r.error||"重命名失败","bad");return}
+    setStatus("已重命名","ok");await load();
+  }catch(e){setStatus(e.message,"bad")}
 }
 async function deleteAccount(id,name){
   if(!confirm(`删除账号「${name}」？凭证会被移除，可以在面板重新登录。`))return;
+  setStatus("正在删除...","busy");
   try{
     const r=await api("/accounts/delete",{method:"POST",body:JSON.stringify({id})});
-    if(r.status!=="ok"){log(r.error||"删除失败");return}
+    if(r.status!=="ok"){setStatus(r.error||"删除失败","bad");return}
     // The plugin has no host delete primitive, so the panel calls CPA directly.
     const res=await fetch(r.url,{method:r.method||"DELETE",credentials:"omit",headers:{...headers()}});
-    if(!res.ok){log("删除失败：CPA 返回 "+res.status);return}
-    log("已删除，可重新登录");await load();
-  }catch(e){log(e.message)}
+    if(!res.ok){setStatus("删除失败：CPA 返回 "+res.status,"bad");return}
+    setStatus("已删除，可重新登录","ok");await load();
+  }catch(e){setStatus(e.message,"bad")}
 }
 function render(){renderGroups();renderModels()}
 async function load(){
-  log("加载中...");
+  setStatus("加载中...","busy");
   try{
     const [models,accounts]=await Promise.all([api("/models"),api("/accounts")]);
     state=models;render();renderAccounts((accounts.accounts||[]));
     hideAuth();
-    log("已刷新");
-  }catch(e){log(e.message);document.getElementById("models").innerHTML=`<div class="err">${esc(e.message)}</div>`}
+    const count=(accounts.accounts||[]).length;
+    setStatus(`已刷新 · ${(state.models||[]).length} 个模型 · ${count} 个账号`,"ok");
+  }catch(e){setStatus(e.message,"bad");document.getElementById("models").innerHTML=`<div class="err">${esc(e.message)}</div>`}
 }
 async function mutate(action,id){
   try{
     state=await api("/models/action",{method:"POST",body:JSON.stringify({action,id})});
-    render();log("已更新模型");
-  }catch(e){log(e.message)}
+    render();setStatus("已更新模型","ok");
+  }catch(e){setStatus(e.message,"bad")}
 }
 async function startLogin(){
+  setStatus("正在创建登录链接...","busy");
   try{
     const r=await api("/oauth/start",{method:"POST",body:"{}"});
-    if(r.status!=="pending"){log(r.error||"登录启动失败");return}
+    if(r.status!=="pending"){setStatus(r.error||"登录启动失败","bad");return}
     loginState=r.state;
     document.getElementById("loginBox").innerHTML=`<div class="login-url">在浏览器打开：<a href="${esc(r.url)}" target="_blank" rel="noreferrer">${esc(r.url)}</a></div>`;
-    log("等待浏览器授权...");
+    setStatus("等待浏览器授权...","busy");
     pollLogin();
-  }catch(e){log(e.message)}
+  }catch(e){setStatus(e.message,"bad")}
 }
 async function pollLogin(){
   if(!loginState)return;
   try{
     const r=await api("/oauth/poll",{method:"POST",body:JSON.stringify({state:loginState})});
     if(r.status==="pending"){setTimeout(pollLogin,2000);return}
-    if(r.status==="ok"){log("登录成功："+(r.file||""));loginState=null;await load();return}
+    if(r.status==="ok"){setStatus("登录成功："+(r.file||""),"ok");loginState=null;document.getElementById("loginBox").innerHTML="";await load();return}
     loginState=null;
-    log(r.error||"登录失败");
-  }catch(e){log(e.message)}
+    setStatus(r.error||"登录失败","bad");
+  }catch(e){setStatus(e.message,"bad")}
 }
 document.getElementById("refresh").onclick=load;
 document.getElementById("login").onclick=startLogin;
 document.getElementById("keySave").onclick=async ()=>{
   const v=document.getElementById("keyInput").value.trim();
   if(!v)return;
-  if(!storeSessionKey(v)){log("无法保存密钥到 sessionStorage");return}
+  if(!storeSessionKey(v)){setStatus("无法保存密钥到 sessionStorage","bad");return}
   await load();
 };
 load();

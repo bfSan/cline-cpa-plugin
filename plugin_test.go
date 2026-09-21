@@ -466,6 +466,52 @@ func TestManagementUnknownRouteReturns404(t *testing.T) {
 	}
 }
 
+func TestOwnAuthFileUsesRuntimeProviderInsteadOfRegisteredName(t *testing.T) {
+	entry := hostAuthFileEntry{
+		Name:      "cline.json",
+		AuthIndex: "demo-index",
+		Provider:  providerName,
+		Type:      providerName,
+	}
+	if !isOwnAuthFile(entry) {
+		t.Fatal("runtime Cline credential was rejected because its registered name is cline.json")
+	}
+	if isOwnAuthFile(hostAuthFileEntry{Name: "cline.json", Provider: "qoder"}) {
+		t.Fatal("another provider's credential was accepted")
+	}
+	if !isOwnAuthFile(hostAuthFileEntry{Name: "cline-account.json"}) {
+		t.Fatal("disk-only callback path should keep accepting cline-*.json names")
+	}
+}
+
+func TestEffectiveAuthNamePrefersPhysicalPath(t *testing.T) {
+	entry := hostAuthFileEntry{
+		Name: "cline.json",
+		Path: "/opt/cpa/auths/cline-usr-123.json",
+	}
+	if got := effectiveAuthName(entry); got != "cline-usr-123.json" {
+		t.Fatalf("effectiveAuthName = %q, want physical file name", got)
+	}
+	if got := effectiveAuthName(hostAuthFileEntry{Name: "cline.json"}); got != "cline.json" {
+		t.Fatalf("effectiveAuthName fallback = %q", got)
+	}
+}
+
+func TestHostAuthGetDecodesJSONObjectPayload(t *testing.T) {
+	result := json.RawMessage(`{"auth_index":"demo-index","name":"cline-demo.json","path":"/tmp/cline-demo.json","json":{"provider":"cline","auth":{"accessToken":"token"}}}`)
+	raw, err := json.Marshal(envelope{OK: true, Result: result})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	got, err := decodeHostAuthGetResponse(raw)
+	if err != nil {
+		t.Fatalf("decodeHostAuthGetResponse: %v", err)
+	}
+	if string(got) != `{"provider":"cline","auth":{"accessToken":"token"}}` {
+		t.Fatalf("json payload = %s", got)
+	}
+}
+
 func TestManagementOAuthPollRequiresState(t *testing.T) {
 	resp := managementOAuthPoll(pluginapi.ManagementRequest{})
 	if resp["status"] != "error" {
@@ -477,6 +523,23 @@ func TestPollLoginUnknownStateReportsError(t *testing.T) {
 	resp := pollLogin("missing-state")
 	if resp.Status != pluginapi.AuthLoginStatusError {
 		t.Fatalf("status = %v, want error", resp.Status)
+	}
+}
+
+func TestBuildDeviceLoginURLDoesNotDuplicateUserCode(t *testing.T) {
+	complete := "https://authkit.cline.bot/device?user_code=ABCD-EFGH"
+	if got := buildDeviceLoginURL(workOSDeviceResponse{
+		UserCode:                "ABCD-EFGH",
+		VerificationURI:         "https://authkit.cline.bot/device",
+		VerificationURIComplete: complete,
+	}); got != complete {
+		t.Fatalf("complete URL = %q, want %q", got, complete)
+	}
+	if got := buildDeviceLoginURL(workOSDeviceResponse{
+		UserCode:        "ABCD-EFGH",
+		VerificationURI: "https://authkit.cline.bot/device",
+	}); got != "https://authkit.cline.bot/device?user_code=ABCD-EFGH" {
+		t.Fatalf("fallback URL = %q", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -12,6 +13,19 @@ import (
 type hostAuthFileEntry struct {
 	Name      string `json:"name"`
 	AuthIndex string `json:"auth_index"`
+	Provider  string `json:"provider"`
+	Type      string `json:"type"`
+	Path      string `json:"path"`
+}
+
+// effectiveAuthName returns the physical auth file name. The host can report a
+// registered runtime name ("cline.json") while Path points at the real
+// per-account file ("cline-usr-....json"); rename/delete must use the latter.
+func effectiveAuthName(file hostAuthFileEntry) string {
+	if base := strings.TrimSpace(filepath.Base(strings.TrimSpace(file.Path))); base != "" && base != "." {
+		return base
+	}
+	return strings.TrimSpace(file.Name)
 }
 
 type rpcHostAuthListResponse struct {
@@ -19,7 +33,7 @@ type rpcHostAuthListResponse struct {
 }
 
 type rpcHostAuthGetResponse struct {
-	JSON []byte `json:"json"`
+	JSON json.RawMessage `json:"json"`
 }
 
 func hostAuthListFiles() ([]hostAuthFileEntry, error) {
@@ -44,15 +58,36 @@ func hostAuthGetByIndex(authIndex string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeHostAuthGetResponse(raw)
+}
+
+// decodeHostAuthGetResponse unwraps one host.auth.get reply.
+//
+// The response's "json" field is a JSON object, not a base64 string, so it must
+// be decoded into json.RawMessage. Decoding it into []byte fails with a type
+// error that used to be reported as a misleading "bad envelope".
+func decodeHostAuthGetResponse(raw []byte) ([]byte, error) {
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
 		return nil, fmt.Errorf("host.auth.get failed")
 	}
 	var resp rpcHostAuthGetResponse
 	if err := json.Unmarshal(env.Result, &resp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("host.auth.get decode result: %w", err)
 	}
-	return resp.JSON, nil
+	if len(resp.JSON) == 0 {
+		return nil, fmt.Errorf("host.auth.get returned empty credential JSON")
+	}
+	return cloneJSON(resp.JSON), nil
+}
+
+// cloneJSON returns a standalone copy so callers never hold an alias into the
+// RPC response buffer.
+func cloneJSON(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append([]byte(nil), raw...)
 }
 
 // authFileDocument is the physical credential file as CPA stores it. Rename

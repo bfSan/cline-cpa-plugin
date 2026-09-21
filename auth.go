@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -174,11 +175,11 @@ func startLogin() (pluginapi.AuthLoginStartResponse, error) {
 		}
 		return pluginapi.AuthLoginStartResponse{}, fmt.Errorf("WorkOS device authorization failed: %s", msg)
 	}
-	loginURL := device.VerificationURIComplete
+	resultURL := buildDeviceLoginURL(device)
+	loginURL := device.VerificationURI
 	if loginURL == "" {
-		loginURL = device.VerificationURI
+		loginURL = device.VerificationURIComplete
 	}
-	resultURL := loginURL + "?user_code=" + device.UserCode
 	state := randomHex(24)
 	expiresIn := time.Duration(device.ExpiresIn) * time.Second
 	if expiresIn <= 0 {
@@ -203,6 +204,29 @@ func startLogin() (pluginapi.AuthLoginStartResponse, error) {
 		State:     state,
 		ExpiresAt: time.Now().Add(expiresIn),
 	}, nil
+}
+
+// buildDeviceLoginURL returns the browser URL for a WorkOS device grant.
+//
+// WorkOS already returns verification_uri_complete with the user_code query
+// parameter embedded. Appending it again produced
+// "...?user_code=ABC?user_code=ABC", which browsers treat as a broken URL.
+func buildDeviceLoginURL(device workOSDeviceResponse) string {
+	if complete := strings.TrimSpace(device.VerificationURIComplete); complete != "" {
+		return complete
+	}
+	base := strings.TrimSpace(device.VerificationURI)
+	if base == "" || strings.TrimSpace(device.UserCode) == "" {
+		return base
+	}
+	if strings.Contains(base, "user_code=") {
+		return base
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + "user_code=" + url.QueryEscape(strings.TrimSpace(device.UserCode))
 }
 
 func handlePollLogin(raw []byte) ([]byte, error) {

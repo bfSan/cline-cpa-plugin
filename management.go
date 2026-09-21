@@ -228,10 +228,10 @@ func handleAccountRename(body []byte) pluginapi.ManagementResponse {
 	if note == "" {
 		note = firstNonEmpty(sa.Account.DisplayName, sa.Account.Email, providerName)
 	}
-	if err := setAuthFileNote(file.Name, raw, note); err != nil {
+	if err := setAuthFileNote(effectiveAuthName(file), raw, note); err != nil {
 		return mgmtJSONResponse(http.StatusInternalServerError, map[string]any{"error": err.Error()})
 	}
-	return mgmtJSONResponse(http.StatusOK, map[string]any{"status": "ok", "file": file.Name, "note": note})
+	return mgmtJSONResponse(http.StatusOK, map[string]any{"status": "ok", "file": effectiveAuthName(file), "note": note})
 }
 
 // handleAccountDelete removes one credential. The plugin SDK has no auth.delete
@@ -254,9 +254,9 @@ func handleAccountDelete(body []byte) pluginapi.ManagementResponse {
 	}
 	return mgmtJSONResponse(http.StatusOK, map[string]any{
 		"status":  "ok",
-		"file":    file.Name,
+		"file":    effectiveAuthName(file),
 		"method":  http.MethodDelete,
-		"url":     loadedManagementBasePath() + "/auth-files?name=" + url.QueryEscape(file.Name),
+		"url":     loadedManagementBasePath() + "/auth-files?name=" + url.QueryEscape(effectiveAuthName(file)),
 		"message": "credential removed; re-login from the panel to add it back",
 	})
 }
@@ -272,7 +272,7 @@ func findOwnAuthFile(authIndex string) (hostAuthFileEntry, []byte, error) {
 		if !strings.EqualFold(strings.TrimSpace(file.AuthIndex), authIndex) {
 			continue
 		}
-		if !isOwnAuthFile(file.Name) {
+		if !isOwnAuthFile(file) {
 			return hostAuthFileEntry{}, nil, fmt.Errorf("auth %s does not belong to %s", authIndex, providerName)
 		}
 		raw, err := hostAuthGetByIndex(file.AuthIndex)
@@ -422,11 +422,21 @@ type accountSummaryEntry struct {
 	Note        string `json:"note,omitempty"`
 }
 
-// isOwnAuthFile reports whether an auth file belongs to this provider. Files
-// are named "<provider>-<account>.json", with the legacy "cline.json" kept for
-// single-account installs.
-func isOwnAuthFile(name string) bool {
-	name = strings.ToLower(strings.TrimSpace(name))
+// isOwnAuthFile reports whether an auth entry belongs to this provider.
+//
+// Do not use the host callback's Name field as the source of truth: the host
+// reports the registered credential name (for Cline that is "cline.json") even
+// when the physical auth file is named "cline-<account>.json". Filtering by
+// Name therefore drops every Cline account. Provider/type are populated by the
+// host from the runtime credential and stay correct for both old and new
+// files; keep the filename fallback for the disk-only callback path, which
+// does not always populate provider metadata.
+func isOwnAuthFile(file hostAuthFileEntry) bool {
+	provider := strings.ToLower(strings.TrimSpace(firstNonEmpty(file.Provider, file.Type)))
+	if provider != "" {
+		return provider == providerName
+	}
+	name := strings.ToLower(effectiveAuthName(file))
 	if name == "" {
 		return false
 	}
@@ -446,7 +456,7 @@ func accountSummary() accountSummaryWire {
 	}
 	result := accountSummaryWire{}
 	for _, file := range files {
-		if !isOwnAuthFile(file.Name) {
+		if !isOwnAuthFile(file) {
 			continue
 		}
 		raw, err := hostAuthGetByIndex(file.AuthIndex)
@@ -464,7 +474,7 @@ func accountSummary() accountSummaryWire {
 			Plan:        sa.Account.Plan,
 			PlanStatus:  sa.Account.PlanStatus,
 			LastChecked: time.Now().UTC().Format(time.RFC3339),
-			File:        strings.TrimSpace(file.Name),
+			File:        effectiveAuthName(file),
 			Note:        storedNote(raw),
 		})
 	}

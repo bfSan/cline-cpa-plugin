@@ -421,7 +421,6 @@ type accountSummaryEntry struct {
 	Email       string `json:"email,omitempty"`
 	Plan        string `json:"plan,omitempty"`
 	PlanStatus  string `json:"plan_status,omitempty"`
-	Credit      string `json:"credits,omitempty"`
 	LastChecked string `json:"last_checked,omitempty"`
 	File        string `json:"file,omitempty"`
 	Note        string `json:"note,omitempty"`

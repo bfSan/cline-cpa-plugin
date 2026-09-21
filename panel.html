@@ -154,7 +154,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button.sec:hover{background
 <body>
 <div class="wrap">
   <h1>Cline / ClinePass</h1>
-  <div class="sub">OAuth 订阅接入，不使用 API Key。订阅权益不足的模型会明确报错，不会让整个账号进入冷却。</div>
+  <div class="sub">OAuth 订阅接入，不使用 API Key。ClinePass 按套餐额度使用，订阅权益不足的模型会明确报错，不会让整个账号进入冷却。</div>
   <div id="authBox" class="card" style="display:none;margin-bottom:16px">
     <div style="margin-bottom:8px;color:var(--mut)">需要管理密钥（management key）才能访问账号数据。从 CPA 主面板嵌入时会自动获取，无需输入。</div>
     <div style="display:flex;gap:8px">
@@ -340,11 +340,9 @@ function accountCard(a){
   const plan=accountPlan(a);
   const nickname=accountNick(a);
   const meta=[a.email,a.file].filter(Boolean).join(" · ");
-  const credits=(a.credits===""||a.credits==null)?"未知":a.credits;
   return `<div class="card" data-auth="${esc(a.id||"")}">
   <h2>${esc(nickname)} <span style="display:flex;gap:6px;align-items:center"><span class="badge ${plan.cls}">${esc(plan.text)}</span></span></h2>
   <div class="uid">${esc(meta)}</div>
-  <div class="row"><span class="k">积分</span><span class="v ${credits==="未知"?"warn":""}">${esc(credits)}</span></div>
   <div class="row"><span class="k">最后检查</span><span class="v mut">${esc(a.last_checked||"")}</span></div>
   <div class="actions">
     <button class="sec" data-action="rename" data-auth="${esc(a.id||"")}" data-nick="${esc(a.nickname||"")}">重命名</button>
@@ -369,13 +367,12 @@ function renderSummary(){
   const box=document.getElementById("summaryBox");
   if(!lastAccounts.length){box.style.display="none";box.innerHTML="";return}
   const active=lastAccounts.filter(a=>a.plan_status==="active").length;
-  const known=lastAccounts.filter(a=>a.credits!==""&&a.credits!=null).length;
   box.style.display="block";
-  box.innerHTML=`<div class="summary-hd"><div class="summary-title">账号汇总</div><div class="summary-meta">${lastAccounts.length} 个账号 · 订阅 ${active} · 有积分 ${known}</div></div>
+  box.innerHTML=`<div class="summary-hd"><div class="summary-title">账号汇总</div><div class="summary-meta">${lastAccounts.length} 个账号 · 订阅生效 ${active}</div></div>
   <div class="summary-grid">
     <div class="summary-item"><div class="k">账号</div><div class="v">${lastAccounts.length}</div></div>
     <div class="summary-item"><div class="k">ClinePass 生效</div><div class="v ok">${active}</div></div>
-    <div class="summary-item"><div class="k">积分已知</div><div class="v">${known}</div></div>
+    <div class="summary-item"><div class="k">未订阅</div><div class="v">${lastAccounts.length-active}</div></div>
   </div>`;
 }
 async function renameAccount(id,current){
@@ -402,6 +399,15 @@ async function deleteAccount(id,name){
 
 /* ---- models ---- */
 const MODEL_SOURCE_LABEL={dynamic:"上游实时","cline-recommended":"上游实时",config:"配置覆盖",cache:"缓存",fallback:"内置回退",none:"未知"};
+function normalizeModel(m){
+  const id=String((m&&(m.id??m.ID))||"");
+  const displayName=String((m&&(m.displayName??m.DisplayName??m.name??m.Name))||"");
+  const name=String((m&&(m.name??m.Name??m.displayName??m.DisplayName))||"");
+  return {id,displayName,name,hidden:!!(m&&m.hidden),raw:m};
+}
+function normalizeModels(list){
+  return Array.isArray(list)?list.map(normalizeModel).filter(m=>m.id):[];
+}
 function modelGroup(id){
   for(const [group,ids] of Object.entries(modelGroups||{})){
     if(Array.isArray(ids)&&ids.includes(id))return group;
@@ -421,7 +427,7 @@ function filterGroup(group,btn){
 }
 function updateGroupCounts(){
   const counts={all:lastModels.length,default:0,clinepass:0,free:0,clinecloud:0};
-  lastModels.forEach(m=>{const g=modelGroup(String(m.id||""));if(counts[g]!=null)counts[g]++});
+  lastModels.forEach(m=>{const g=modelGroup(m.id);if(counts[g]!=null)counts[g]++});
   const map={all:"cntAll",default:"cntDefault",clinepass:"cntPass",free:"cntFree",clinecloud:"cntCloud"};
   for(const [k,id] of Object.entries(map)){const el=document.getElementById(id);if(el)el.textContent=String(counts[k]||0)}
 }
@@ -431,7 +437,7 @@ async function loadModels(showError){
   const hintEl=document.getElementById("modelHint");
   try{
     const d=await api("/models");
-    lastModels=Array.isArray(d.models)?d.models:[];
+    lastModels=normalizeModels(d.models);
     modelGroups=(d.groups&&typeof d.groups==="object")?d.groups:{};
     currentOverlay=d.overlay||{};
     const src=d.source||"none";
@@ -449,15 +455,14 @@ function renderModels(){
   const box=document.getElementById("modelList");
   if(!box)return;
   const hidden=hiddenSet();
-  const models=lastModels.filter(m=>currentGroup==="all"||modelGroup(String(m.id||""))===currentGroup);
+  const models=lastModels.filter(m=>currentGroup==="all"||modelGroup(m.id)===currentGroup);
   if(!models.length){box.innerHTML='<div class="mut">暂无模型</div>';return}
   box.innerHTML=`<div class="model-rows">`+models.map((m,i)=>{
-    const id=String(m.id||"");
+    const id=m.id;
     const name=m.displayName||m.name||"";
     const isHidden=hidden.has(id)||!!m.hidden;
-    const prev=models[i-1]?String(models[i-1].id||""):"";
-    const next=models[i+1]?String(models[i+1].id||""):"";
-    const afterNext=models[i+2]?String(models[i+2].id||""):"";
+    const prev=models[i-1]?models[i-1].id:"";
+    const afterNext=models[i+2]?models[i+2].id:"";
     return `<div class="model-row ${isHidden?"hidden":""}">
       <span class="model-id" title="${esc(id)}">${esc(id)}</span>
       <span class="model-name mut">${esc(name)}</span>
@@ -477,7 +482,7 @@ async function modelAction(action,id,before){
     const payload={action,id};
     if(action==="move")payload.before=before||"";
     const d=await api("/models/action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
-    if(d&&d.models)lastModels=d.models;
+    if(d&&d.models)lastModels=normalizeModels(d.models);
     if(d&&d.groups)modelGroups=d.groups;
     if(d&&d.overlay)currentOverlay=d.overlay;
     if(action==="move"||action==="add")toast("排序和自定义模型仅保存在内存中，CPA 重启后恢复","warn");
@@ -502,7 +507,7 @@ async function load(force,btn){
   try{
     const [acct,models]=await Promise.all([api("/accounts"),api("/models")]);
     lastAccounts=Array.isArray(acct.accounts)?acct.accounts:[];
-    lastModels=Array.isArray(models.models)?models.models:[];
+    lastModels=normalizeModels(models.models);
     modelGroups=(models.groups&&typeof models.groups==="object")?models.groups:{};
     currentOverlay=models.overlay||{};
     document.getElementById("modelSource").textContent=MODEL_SOURCE_LABEL[models.source||"none"]||(models.source||"—");

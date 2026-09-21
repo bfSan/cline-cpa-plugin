@@ -32,9 +32,6 @@ type storedAccount struct {
 	Nickname    string `json:"nickname,omitempty"`
 	Plan        string `json:"plan,omitempty"`
 	PlanStatus  string `json:"planStatus,omitempty"`
-	Balance     int64  `json:"balance,omitempty"`
-	Currency    string `json:"currency,omitempty"`
-	CreditsAt   string `json:"creditsAt,omitempty"`
 }
 
 type clineMeResponse struct {
@@ -58,14 +55,6 @@ type clinePlanResponse struct {
 		} `json:"plan"`
 		SubscriptionID   string `json:"subscriptionId"`
 		CurrentPeriodEnd string `json:"currentPeriodEnd"`
-	} `json:"data"`
-}
-
-type clineBalanceResponse struct {
-	Success bool `json:"success"`
-	Data    struct {
-		UserID  string `json:"userId"`
-		Balance int64  `json:"balance"`
 	} `json:"data"`
 }
 
@@ -498,9 +487,6 @@ func authDataFromStored(id string, sa *storedAuth) pluginapi.AuthData {
 	}
 	if sa.Account.PlanStatus != "" {
 		metadata["plan_status"] = sa.Account.PlanStatus
-	}
-	if sa.Account.Balance > 0 {
-		metadata["credits"] = sa.Account.Balance
 	}
 	return pluginapi.AuthData{
 		Provider:    providerName,

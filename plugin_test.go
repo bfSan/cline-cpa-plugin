@@ -240,15 +240,13 @@ func TestRefreshAuthPostsCamelCaseBody(t *testing.T) {
 	}
 }
 
-func TestAccountSnapshotReadsActivePlanAndBalance(t *testing.T) {
+func TestAccountSnapshotReadsActivePlan(t *testing.T) {
 	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/users/me":
 			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"usr-1","email":"user@example.com","displayName":"User"}}`))
 		case "/api/v1/users/me/plan":
 			_, _ = w.Write([]byte(`{"success":true,"data":{"plan":{"displayName":"Cline Pass (Annual)"},"currentPeriodEnd":"2030-01-01"}}`))
-		case "/api/v1/users/usr-1/balance":
-			_, _ = w.Write([]byte(`{"success":true,"data":{"userId":"usr-1","balance":499637}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -261,9 +259,6 @@ func TestAccountSnapshotReadsActivePlanAndBalance(t *testing.T) {
 	}
 	if sa.Account.PlanStatus != "active" {
 		t.Fatalf("status = %q, want active", sa.Account.PlanStatus)
-	}
-	if sa.Account.Balance != 499637 {
-		t.Fatalf("balance = %d, want 499637", sa.Account.Balance)
 	}
 }
 
@@ -420,6 +415,9 @@ func TestManagementServesPanelHTML(t *testing.T) {
 	resp := decodeResult[pluginapi.ManagementResponse](t, raw)
 	if !strings.Contains(string(resp.Body), "Cline") {
 		t.Fatal("panel html missing Cline marker")
+	}
+	if strings.Contains(string(resp.Body), "积分") || strings.Contains(string(resp.Body), "credits") {
+		t.Fatal("ClinePass uses quota semantics and must not expose credit fields")
 	}
 }
 

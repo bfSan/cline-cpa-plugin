@@ -128,7 +128,10 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 		models, _, _ := effectiveModelCatalogWithState()
 		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 	}
-	models, _, _ := modelCatalogForAuth(sa)
+	// Discovery runs on the host's schedule, not the user's, so it is the path
+	// most likely to meet an expired token: an hour after login the catalog
+	// would silently drop out of the panel without this.
+	models, _, _ := modelCatalogForAuth(freshStoredAuth(sa, req.Attributes))
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }
 

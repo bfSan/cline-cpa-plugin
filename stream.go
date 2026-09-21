@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -81,14 +80,22 @@ func clientNeedsSSEFrame(metadata map[string]any) bool {
 	}
 }
 
-func pumpUpstreamStream(req *http.Request, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel string, started time.Time) {
+// pumpUpstreamStream streams through credential.do, so a credential that
+// expired since the host last persisted it still serves the request instead of
+// failing the stream. Nothing has been emitted when a 401 arrives, which is
+// what makes the retry inside do safe here.
+func pumpUpstreamStream(payload []byte, cred *credential, streamID string, sseFramed bool, requestedModel string, started time.Time) {
 	defer streamClose(streamID)
-	if cancel != nil {
-		defer cancel()
-	}
-	resp, err := sharedHTTPClient().Do(req)
+	resp, err := cred.do(func(current *storedAuth) (*http.Request, error) {
+		httpReq, errReq := newUpstreamChatRequest(payload, current, requestedModel)
+		if errReq != nil {
+			return nil, errReq
+		}
+		httpReq.Header.Set("Accept", "text/event-stream")
+		return httpReq, nil
+	})
 	if err != nil {
-		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
+		streamEmitError(streamID, err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -138,14 +145,15 @@ func pumpUpstreamStream(req *http.Request, cancel context.CancelFunc, streamID s
 	_ = started
 }
 
-func collectUpstreamStream(body []byte, sa *storedAuth, model string, sseFramed bool) ([]pluginapi.ExecutorStreamChunk, int, error) {
-	httpReq, err := newUpstreamChatRequest(body, sa, model)
+func collectUpstreamStream(body []byte, cred *credential, model string, sseFramed bool) ([]pluginapi.ExecutorStreamChunk, int, error) {
+	resp, err := cred.do(func(current *storedAuth) (*http.Request, error) {
+		return newUpstreamChatRequest(body, current, model)
+	})
 	if err != nil {
+		if statusError, ok := err.(*upstreamStatusError); ok {
+			return nil, statusError.status, statusError
+		}
 		return nil, 0, err
-	}
-	resp, err := sharedHTTPClient().Do(httpReq)
-	if err != nil {
-		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {

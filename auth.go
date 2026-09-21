@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -358,47 +359,20 @@ func handleRefreshAuth(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	payload := map[string]string{
-		"refreshToken": sa.Auth.RefreshToken,
-		"grantType":    "refresh_token",
+	// The executor rotates credentials on its own, so the host can ask for a
+	// refresh against a snapshot the plugin has already superseded. Reusing the
+	// cached pair there keeps a rotated refresh token from being spent twice.
+	cred := newCredential(sa, req.Attributes)
+	if !cred.adopted {
+		if err := cred.prepare(true); err != nil {
+			return nil, err
+		}
+		cred.enrichAndPersist(fetchAccountSnapshot)
 	}
-	resp, err := postJSON(clineAPIBase+"/api/v1/auth/refresh", payload, nil)
-	if err != nil {
-		return nil, err
-	}
-	body, err := readAllAndClose(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Cline token refresh failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 240))
-	}
-	var parsed clineAuthResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("decode Cline refresh response: %w", err)
-	}
-	if !parsed.Success || parsed.Data.AccessToken == "" {
-		return nil, fmt.Errorf("Cline refresh returned no access token")
-	}
-	sa.Auth.AccessToken = parsed.Data.AccessToken
-	if parsed.Data.RefreshToken != "" {
-		sa.Auth.RefreshToken = parsed.Data.RefreshToken
-	}
-	sa.Auth.ExpiresAt = parseExpiryMillis(parsed.Data.ExpiresAt)
-	if parsed.Data.UserInfo.ClineUID != "" {
-		sa.Account.ID = parsed.Data.UserInfo.ClineUID
-	}
-	if parsed.Data.UserInfo.Email != "" {
-		sa.Account.Email = parsed.Data.UserInfo.Email
-	}
-	if parsed.Data.UserInfo.Name != "" {
-		sa.Account.DisplayName = parsed.Data.UserInfo.Name
-	}
-	fetchAccountSnapshot(sa)
-	auth := authDataFromStored(req.AuthID, sa)
+	auth := authDataFromStored(req.AuthID, cred.sa)
 	return okEnvelope(pluginapi.AuthRefreshResponse{
 		Auth:             auth,
-		NextRefreshAfter: time.UnixMilli(sa.Auth.ExpiresAt).Add(-5 * time.Minute),
+		NextRefreshAfter: nextCredentialRefreshAt(cred.sa),
 	})
 }
 
@@ -497,8 +471,13 @@ func authDataFromStored(id string, sa *storedAuth) pluginapi.AuthData {
 		Metadata:    metadata,
 		Attributes: map[string]string{
 			"auth_kind": "oauth",
+			// Cline's access token lives one hour, and CPA only schedules a
+			// refresh for providers that declare a cadence. Without this the
+			// host never calls AuthRefresh and the account goes dark on the
+			// hour; the plugin's own pre-request refresh is the safety net.
+			authRefreshIntervalAttribute: strconv.Itoa(int(credentialRefreshLead / time.Second)),
 		},
-		NextRefreshAfter: time.UnixMilli(sa.Auth.ExpiresAt).Add(-5 * time.Minute),
+		NextRefreshAfter: nextCredentialRefreshAt(sa),
 	}
 }
 

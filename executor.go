@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,14 +142,20 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 			payload = rewritten
 		}
 	}
-	httpReq, err := newUpstreamChatRequest(payload, sa, req.Model)
+	cred := newCredential(sa, req.AuthAttributes)
+	resp, err := cred.do(func(current *storedAuth) (*http.Request, error) {
+		httpReq, errReq := newUpstreamChatRequest(payload, current, req.Model)
+		if errReq != nil {
+			return nil, errReq
+		}
+		httpReq.Header.Set("Accept", "application/json")
+		return httpReq, nil
+	})
 	if err != nil {
+		if statusError, ok := asUpstreamStatusError(err); ok {
+			return errorEnvelopeWithStatus("http_error", statusError.message, statusError.status), nil
+		}
 		return nil, err
-	}
-	httpReq.Header.Set("Accept", "application/json")
-	resp, err := sharedHTTPClient().Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("http_error: %w", err)
 	}
 	body, err := readAllAndClose(resp.Body)
 	if err != nil {
@@ -197,8 +204,9 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	}
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
+	cred := newCredential(sa, req.AuthAttributes)
 	if req.StreamID == "" {
-		chunks, status, err := collectUpstreamStream(payload, sa, req.Model, sseFramed)
+		chunks, status, err := collectUpstreamStream(payload, cred, req.Model, sseFramed)
 		if err != nil {
 			if statusError, ok := err.(*upstreamStatusError); ok {
 				return errorEnvelopeWithStatus("http_error", statusError.message, statusError.status), nil
@@ -207,13 +215,18 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		}
 		return okEnvelope(streamResponse{Headers: headers, Chunks: chunks})
 	}
-	httpReq, err := newUpstreamChatRequest(payload, sa, req.Model)
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Accept", "text/event-stream")
-	go pumpUpstreamStream(httpReq, nil, req.StreamID, sseFramed, req.Model, time.Now())
+	go pumpUpstreamStream(payload, cred, req.StreamID, sseFramed, req.Model, time.Now())
 	return okEnvelope(streamResponse{Headers: headers})
+}
+
+// asUpstreamStatusError unwraps the typed upstream errors the executor raises so
+// the host sees the right status instead of a generic failure.
+func asUpstreamStatusError(err error) (*upstreamStatusError, bool) {
+	var statusError *upstreamStatusError
+	if errors.As(err, &statusError) {
+		return statusError, true
+	}
+	return nil, false
 }
 
 func validatePayloadJSON(payload []byte) error {

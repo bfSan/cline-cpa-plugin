@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,6 +68,10 @@ func withUpstream(t *testing.T, handler http.Handler) {
 	previous := clineAPIBase
 	clineAPIBase = server.URL
 	t.Cleanup(func() { clineAPIBase = previous })
+	// The credential layer keeps process-wide state, so tests that refresh one
+	// account would otherwise leak a newer credential into the next test and
+	// quietly skip the refresh being asserted.
+	t.Cleanup(clearCredentialState)
 }
 
 func testStoredAuth() *storedAuth {
@@ -458,6 +466,311 @@ func TestNormalizeUpstreamResponseKeepsPlainPayload(t *testing.T) {
 	body := []byte(`{"choices":[{"message":{"content":"OK"}}]}`)
 	if got := normalizeUpstreamResponse(body); string(got) != string(body) {
 		t.Fatalf("plain payload changed: %s", got)
+	}
+}
+
+// clearCredentialState drops the process-wide credential cache so a test never
+// inherits another test's rotated token.
+func clearCredentialState() {
+	credentialMu.Lock()
+	credentialCache = map[string]*storedAuth{}
+	credentialMu.Unlock()
+	credentialCallMu.Lock()
+	credentialCalls = map[string]*refreshCall{}
+	credentialCallMu.Unlock()
+}
+
+func resetCredentialState(t *testing.T) {
+	t.Helper()
+	clearCredentialState()
+}
+
+func storedAuthExpiringIn(d time.Duration) *storedAuth {
+	sa := testStoredAuth()
+	sa.Auth.ExpiresAt = time.Now().Add(d).UnixMilli()
+	return sa
+}
+
+// heldCredential is what a manually held in-flight call resolves with. Its
+// tokens differ from anything the fake upstream issues, so a caller that
+// bypassed the single flight could not pass by accident.
+func heldCredential() *storedAuth {
+	sa := storedAuthExpiringIn(48 * time.Hour)
+	sa.Auth.AccessToken = "held-access"
+	sa.Auth.RefreshToken = "held-refresh"
+	return sa
+}
+
+func TestNeedsRefreshHonoursLead(t *testing.T) {
+	now := time.Now()
+	if needsRefresh(storedAuthExpiringIn(5*time.Minute), now) != true {
+		t.Fatal("token inside the lead should need refresh")
+	}
+	if needsRefresh(storedAuthExpiringIn(time.Hour), now) != false {
+		t.Fatal("token outside the lead should not need refresh")
+	}
+	unknown := testStoredAuth()
+	unknown.Auth.ExpiresAt = 0
+	if needsRefresh(unknown, now) != true {
+		t.Fatal("unknown expiry must be treated as stale")
+	}
+}
+
+// The whole point of the credential layer: an expired token is replaced before
+// the request goes out, so the plugin never needs the host to schedule it.
+func TestExecutorRefreshesExpiringCredentialBeforeRequest(t *testing.T) {
+	resetCredentialState(t)
+	var refreshCalls int
+	var sawAuthorization string
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			refreshCalls++
+			_, _ = w.Write([]byte(`{"success":true,"data":{
+				"accessToken":"fresh-access","refreshToken":"fresh-refresh",
+				"expiresAt":"2030-01-01T00:00:00Z","tokenType":"Bearer"}}`))
+		case "/api/v1/chat/completions":
+			sawAuthorization = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	raw, err := handleMethod(pluginabi.MethodExecutorExecute, mustJSON(t, pluginapi.ExecutorRequest{
+		Model:       "cline-free/kimi-k3",
+		StorageJSON: mustJSON(t, storedAuthExpiringIn(2*time.Minute)),
+		Payload:     []byte(`{"model":"cline-free/kimi-k3","messages":[]}`),
+	}))
+	if err != nil {
+		t.Fatalf("handleMethod error = %v", err)
+	}
+	if env := decodeEnvelope(t, raw); !env.OK {
+		t.Fatalf("execute failed: %+v", env.Error)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	if !strings.Contains(sawAuthorization, "fresh-access") {
+		t.Fatalf("upstream saw %q, want the refreshed token", sawAuthorization)
+	}
+}
+
+// A token revoked server side still serves the user: the 401 triggers one
+// refresh and one replay of the request.
+func TestExecutorRetriesOnceAfterUpstream401(t *testing.T) {
+	resetCredentialState(t)
+	var refreshCalls, chatCalls int
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			refreshCalls++
+			_, _ = w.Write([]byte(`{"success":true,"data":{
+				"accessToken":"fresh-access","refreshToken":"fresh-refresh",
+				"expiresAt":"2030-01-01T00:00:00Z","tokenType":"Bearer"}}`))
+		case "/api/v1/chat/completions":
+			chatCalls++
+			if chatCalls == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"Unauthorized: re-authenticate your Cline account."}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	raw, err := handleMethod(pluginabi.MethodExecutorExecute, mustJSON(t, pluginapi.ExecutorRequest{
+		Model:       "cline-free/kimi-k3",
+		StorageJSON: mustJSON(t, storedAuthExpiringIn(time.Hour)),
+		Payload:     []byte(`{"model":"cline-free/kimi-k3","messages":[]}`),
+	}))
+	if err != nil {
+		t.Fatalf("handleMethod error = %v", err)
+	}
+	if env := decodeEnvelope(t, raw); !env.OK {
+		t.Fatalf("execute failed after retry: %+v", env.Error)
+	}
+	if refreshCalls != 1 || chatCalls != 2 {
+		t.Fatalf("refresh=%d chat=%d, want 1 refresh and 2 chat calls", refreshCalls, chatCalls)
+	}
+}
+
+func TestConcurrentRefreshesJoinInFlightGrant(t *testing.T) {
+	resetCredentialState(t)
+	var refreshCalls atomic.Int32
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			refreshCalls.Add(1)
+			_, _ = w.Write([]byte(`{"success":true,"data":{
+				"accessToken":"fresh-access","refreshToken":"fresh-refresh",
+				"expiresAt":"2030-01-01T00:00:00Z","tokenType":"Bearer"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	// Hold a refresh open for the account the way an in-flight grant would, so
+	// every caller below has to wait on it instead of starting its own.
+	// Add before publishing the entry, exactly as refreshCredential does, so a
+	// joiner can never wait on an empty WaitGroup and slip through.
+	inFlight := &refreshCall{}
+	inFlight.done.Add(1)
+	credentialCallMu.Lock()
+	credentialCalls["id:usr-1"] = inFlight
+	credentialCallMu.Unlock()
+
+	var wg sync.WaitGroup
+	results := make([]*storedAuth, 4)
+	for i := range results {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			sa, err := refreshCredential("id:usr-1", storedAuthExpiringIn(time.Minute))
+			if err != nil {
+				t.Errorf("refresh: %v", err)
+				return
+			}
+			results[slot] = sa
+		}(i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	inFlight.sa = heldCredential()
+	inFlight.done.Done()
+	wg.Wait()
+
+	if got := refreshCalls.Load(); got != 0 {
+		t.Fatalf("refresh grants = %d, want callers to join the in-flight one", got)
+	}
+	for i, sa := range results {
+		if sa == nil || sa.Auth.AccessToken != "held-access" {
+			t.Fatalf("caller %d got %+v, want the held credential", i, sa)
+		}
+	}
+
+	// A finished leader must unregister itself. If it stayed in the map, every
+	// later refresh would join a completed call and the credential would never
+	// rotate again.
+	credentialCallMu.Lock()
+	credentialCalls = map[string]*refreshCall{}
+	credentialCallMu.Unlock()
+	if _, err := refreshCredential("id:usr-1", storedAuthExpiringIn(time.Minute)); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("refresh grants = %d, want one after the held call finished", got)
+	}
+	credentialCallMu.Lock()
+	left := len(credentialCalls)
+	credentialCallMu.Unlock()
+	if left != 0 {
+		t.Fatalf("in-flight registrations left = %d, want 0", left)
+	}
+}
+
+// The host can ask for a refresh against a snapshot the plugin already
+// superseded. Spending that refresh token would break the account, so the cache
+// answer is returned without an upstream grant.
+func TestHostRefreshReusesRotatedCredential(t *testing.T) {
+	resetCredentialState(t)
+	// The credential the plugin already rotated: newer expiry, different pair.
+	rotated := heldCredential()
+	rotated.Auth.AccessToken = "fresh-access"
+	rotated.Auth.RefreshToken = "fresh-refresh"
+	cacheCredential(rotated)
+
+	var refreshCalls int
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			refreshCalls++
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"refresh token already used"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	stale := storedAuthExpiringIn(-time.Hour)
+	resp := callMethod[pluginapi.AuthRefreshResponse](t, pluginabi.MethodAuthRefresh, mustJSON(t, pluginapi.AuthRefreshRequest{
+		AuthID:      "cline-1",
+		StorageJSON: mustJSON(t, stale),
+	}))
+	if refreshCalls != 0 {
+		t.Fatalf("refresh grants = %d, want 0 when a newer credential is cached", refreshCalls)
+	}
+	var stored storedAuth
+	if err := json.Unmarshal(resp.Auth.StorageJSON, &stored); err != nil {
+		t.Fatalf("decode storage: %v", err)
+	}
+	if stored.Auth.RefreshToken != "fresh-refresh" {
+		t.Fatalf("refresh token = %q, want the cached rotated value", stored.Auth.RefreshToken)
+	}
+}
+
+// A dead refresh token needs a login, not a retry, so it must surface as 401;
+// a transient grant failure must not look like an authentication problem.
+func TestCredentialFailureStatuses(t *testing.T) {
+	terminal := credentialFailure(&credentialError{terminal: true, status: 401, message: "re-login required"})
+	statusError, ok := terminal.(*upstreamStatusError)
+	if !ok || statusError.status != http.StatusUnauthorized {
+		t.Fatalf("terminal refresh error = %+v, want 401", terminal)
+	}
+	transient := credentialFailure(&credentialError{status: 502, message: "bad gateway"})
+	statusError, ok = transient.(*upstreamStatusError)
+	if !ok || statusError.status != http.StatusServiceUnavailable {
+		t.Fatalf("transient refresh error = %+v, want 503", transient)
+	}
+}
+
+// Persisting must not rewrite the host-owned fields: an account the management
+// UI disabled would otherwise come back to life on the next refresh.
+func TestCredentialPersistKeepsHostOwnedFields(t *testing.T) {
+	dir := t.TempDir()
+	name := authFileNameFor(testStoredAuth())
+	path := filepath.Join(dir, name)
+	disk := `{"type":"cline","provider":"cline","disabled":true,"note":"积分未知","auth":{},"account":{}}`
+	if err := os.WriteFile(path, []byte(disk), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cred := newCredential(storedAuthExpiringIn(time.Hour), map[string]string{authPathAttribute: path})
+	raw, err := cred.fileJSON()
+	if err != nil {
+		t.Fatalf("fileJSON: %v", err)
+	}
+	var doc map[string]any
+	if err = json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode doc: %v", err)
+	}
+	if doc["disabled"] != true {
+		t.Fatalf("disabled = %v, want preserved true", doc["disabled"])
+	}
+	if doc["note"] != "积分未知" {
+		t.Fatalf("note = %v, want preserved", doc["note"])
+	}
+	auth, _ := doc["auth"].(map[string]any)
+	if auth["accessToken"] != "access-token" {
+		t.Fatalf("auth fields not written: %v", doc["auth"])
+	}
+	if cred.fileName != name {
+		t.Fatalf("file name = %q, want %q", cred.fileName, name)
+	}
+}
+
+// The host only schedules refreshes for providers that declare a cadence, so the
+// parsed auth must carry one plus a concrete next-refresh time.
+func TestParsedAuthDeclaresRefreshCadence(t *testing.T) {
+	sa := storedAuthExpiringIn(time.Hour)
+	auth := authDataFromStored("cline-1", sa)
+	if got := auth.Attributes[authRefreshIntervalAttribute]; got == "" {
+		t.Fatalf("attributes = %v, want a refresh cadence", auth.Attributes)
+	}
+	want := time.UnixMilli(sa.Auth.ExpiresAt).Add(-credentialRefreshLead)
+	if !auth.NextRefreshAfter.Equal(want) {
+		t.Fatalf("next refresh = %s, want %s", auth.NextRefreshAfter, want)
 	}
 }
 

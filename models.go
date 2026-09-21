@@ -49,9 +49,14 @@ func fallbackModels() []pluginapi.ModelInfo {
 	return []pluginapi.ModelInfo{
 		modelInfo("cline-pass/deepseek-v4.1-flash", "ClinePass DeepSeek V4.1 Flash", passModelGroup, "Fast ClinePass model with a 1M context window."),
 		modelInfo("cline-pass/glm-5.3", "ClinePass GLM 5.3", passModelGroup, "Z-AI top open-weights coding model."),
+		modelInfo("cline-pass/glm-5.2", "ClinePass GLM 5.2", passModelGroup, "Z-AI GLM-5.2 coding model."),
 		modelInfo("cline-pass/deepseek-v4-pro", "ClinePass DeepSeek V4 Pro", passModelGroup, "Frontier reasoning and coding with 1M context."),
+		modelInfo("cline-pass/deepseek-v4-flash", "ClinePass DeepSeek V4 Flash", passModelGroup, "Fast DeepSeek coding model."),
 		modelInfo("cline-pass/kimi-k3", "ClinePass Kimi K3", passModelGroup, "Moonshot flagship open-weights model."),
+		modelInfo("cline-pass/kimi-k2.7-code", "ClinePass Kimi K2.7 Code", passModelGroup, "Moonshot code-focused model."),
+		modelInfo("cline-pass/kimi-k2.6", "ClinePass Kimi K2.6", passModelGroup, "Moonshot open-weights coding model."),
 		modelInfo("cline-pass/qwen3.8-max", "ClinePass Qwen3.8 Max", passModelGroup, "Qwen SOTA coding model."),
+		modelInfo("cline-free/kimi-k3", "Cline Free Kimi K3", freeModelGroup, "Free Moonshot flagship model."),
 		modelInfo("cline-free/deepseek-v4.1-flash", "Cline Free DeepSeek V4.1 Flash", freeModelGroup, "Free Cline model with a 1M context window."),
 		modelInfo("cline-free/muse-spark-1.3-contributor", "Cline Free Muse Spark 1.3 Contributor", freeModelGroup, "Meta multimodal reasoning model."),
 		modelInfo("z-ai/glm-5.3-flash", "Cline Free GLM 5.3 Flash", freeModelGroup, "Latest multimodal GLM-5 model."),
@@ -61,6 +66,19 @@ func fallbackModels() []pluginapi.ModelInfo {
 		modelInfo("moonshotai/kimi-k3", "Cline Recommended Kimi K3", staticModelGroup, "Moonshot flagship model."),
 		modelInfo("anthropic/claude-opus-5", "Cline Recommended Claude Opus 5", staticModelGroup, "Anthropic frontier model."),
 		modelInfo("x-ai/grok-4.5", "Cline Recommended Grok 4.5", staticModelGroup, "xAI frontier model."),
+	}
+}
+
+// clientCompatibilityModels are IDs shipped or observed in Cline Desktop that
+// have been absent from the recommended-models feed at times. Keep these as a
+// union with live discovery so a feed omission cannot remove usable models.
+func clientCompatibilityModels() []pluginapi.ModelInfo {
+	return []pluginapi.ModelInfo{
+		modelInfo("cline-pass/glm-5.2", "ClinePass GLM 5.2", passModelGroup, "Z-AI GLM-5.2 coding model."),
+		modelInfo("cline-pass/deepseek-v4-flash", "ClinePass DeepSeek V4 Flash", passModelGroup, "Fast DeepSeek coding model."),
+		modelInfo("cline-pass/kimi-k2.7-code", "ClinePass Kimi K2.7 Code", passModelGroup, "Moonshot code-focused model."),
+		modelInfo("cline-pass/kimi-k2.6", "ClinePass Kimi K2.6", passModelGroup, "Moonshot open-weights coding model."),
+		modelInfo("cline-free/kimi-k3", "Cline Free Kimi K3", freeModelGroup, "Free Moonshot flagship model."),
 	}
 }
 
@@ -210,6 +228,7 @@ func fetchRecommendedModels(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][
 	if len(models) == 0 {
 		return nil, nil, "", "", fmt.Errorf("recommended models response is empty")
 	}
+	models, groups = mergeModelCatalog(models, groups, clientCompatibilityModels(), clientCompatibilityGroups())
 	entitlement := "unknown"
 	if len(parsed.ClinePass) > 0 {
 		entitlement = "listed"
@@ -226,6 +245,7 @@ func fallbackGroups() map[string][]string {
 			"x-ai/grok-4.5",
 		},
 		freeModelGroup: {
+			"cline-free/kimi-k3",
 			"cline-free/deepseek-v4.1-flash",
 			"cline-free/muse-spark-1.3-contributor",
 			"z-ai/glm-5.3-flash",
@@ -235,11 +255,85 @@ func fallbackGroups() map[string][]string {
 		passModelGroup: {
 			"cline-pass/deepseek-v4.1-flash",
 			"cline-pass/glm-5.3",
+			"cline-pass/glm-5.2",
 			"cline-pass/deepseek-v4-pro",
+			"cline-pass/deepseek-v4-flash",
 			"cline-pass/kimi-k3",
+			"cline-pass/kimi-k2.7-code",
+			"cline-pass/kimi-k2.6",
 			"cline-pass/qwen3.8-max",
 		},
 	}
+}
+
+func clientCompatibilityGroups() map[string][]string {
+	return map[string][]string{
+		freeModelGroup: {
+			"cline-free/kimi-k3",
+		},
+		passModelGroup: {
+			"cline-pass/glm-5.2",
+			"cline-pass/deepseek-v4-flash",
+			"cline-pass/kimi-k2.7-code",
+			"cline-pass/kimi-k2.6",
+		},
+	}
+}
+
+func mergeModelCatalog(primary []pluginapi.ModelInfo, primaryGroups map[string][]string, required []pluginapi.ModelInfo, requiredGroups map[string][]string) ([]pluginapi.ModelInfo, map[string][]string) {
+	models := make([]pluginapi.ModelInfo, 0, len(primary)+len(required))
+	groups := map[string][]string{}
+	seenModels := map[string]struct{}{}
+	modelGroups := map[string]string{}
+	seenGroupModels := map[string]map[string]struct{}{}
+
+	groupForModel := func(source map[string][]string, id string) string {
+		for group, ids := range source {
+			for _, candidate := range ids {
+				if strings.TrimSpace(candidate) == id {
+					return group
+				}
+			}
+		}
+		return ""
+	}
+	appendGroupModel := func(group, id string) {
+		if group == "" {
+			return
+		}
+		if seenGroupModels[group] == nil {
+			seenGroupModels[group] = map[string]struct{}{}
+		}
+		if _, ok := seenGroupModels[group][id]; ok {
+			return
+		}
+		seenGroupModels[group][id] = struct{}{}
+		groups[group] = append(groups[group], id)
+	}
+	appendCatalog := func(source []pluginapi.ModelInfo, sourceGroups map[string][]string) {
+		for _, model := range source {
+			id := strings.TrimSpace(model.ID)
+			if id == "" {
+				continue
+			}
+			group := groupForModel(sourceGroups, id)
+			if _, ok := seenModels[id]; ok {
+				if modelGroups[id] == "" {
+					appendGroupModel(group, id)
+					modelGroups[id] = group
+				}
+				continue
+			}
+			model.ID = id
+			seenModels[id] = struct{}{}
+			modelGroups[id] = group
+			models = append(models, model)
+			appendGroupModel(group, id)
+		}
+	}
+	appendCatalog(primary, primaryGroups)
+	appendCatalog(required, requiredGroups)
+	return models, groups
 }
 
 func cloneGroups(in map[string][]string) map[string][]string {

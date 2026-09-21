@@ -98,11 +98,11 @@ func TestRecommendedModelsParseFourGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchRecommendedModels error = %v", err)
 	}
-	if len(models) != 5 {
-		t.Fatalf("models = %d, want 5", len(models))
+	if len(models) != 9 {
+		t.Fatalf("models = %d, want 5 feed + 4 compatibility-only models", len(models))
 	}
-	if len(groups[passModelGroup]) != 2 {
-		t.Fatalf("clinepass group = %v, want 2 ids", groups[passModelGroup])
+	if len(groups[passModelGroup]) != 6 {
+		t.Fatalf("clinepass group = %v, want 2 feed + 4 compatibility ids", groups[passModelGroup])
 	}
 	if len(groups[freeModelGroup]) != 1 || groups[freeModelGroup][0] != "cline-free/kimi-k3" {
 		t.Fatalf("free group = %v", groups[freeModelGroup])
@@ -110,6 +110,45 @@ func TestRecommendedModelsParseFourGroups(t *testing.T) {
 	if len(groups[cloudModelGroup]) != 1 {
 		t.Fatalf("cloud group = %v", groups[cloudModelGroup])
 	}
+	for _, id := range []string{"cline-free/kimi-k3", "cline-pass/glm-5.2", "cline-pass/kimi-k2.7-code", "cline-pass/kimi-k2.6", "cline-pass/deepseek-v4-flash"} {
+		found := false
+		for _, model := range models {
+			if model.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("client-compatible model %q missing from discovered catalog", id)
+		}
+	}
+}
+
+func TestMergeModelCatalogDeduplicatesRequiredModels(t *testing.T) {
+	primary := []pluginapi.ModelInfo{
+		{ID: "openai/gpt-6-astra"},
+		{ID: "cline-free/kimi-k3"},
+	}
+	primaryGroups := map[string][]string{
+		staticModelGroup: {"openai/gpt-6-astra"},
+		freeModelGroup:   {"cline-free/kimi-k3"},
+	}
+	models, groups := mergeModelCatalog(primary, primaryGroups, clientCompatibilityModels(), clientCompatibilityGroups())
+	seen := map[string]int{}
+	for _, model := range models {
+		seen[model.ID]++
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("model %q appeared %d times after merge", id, count)
+		}
+	}
+	for _, id := range groups[freeModelGroup] {
+		if id == "cline-free/kimi-k3" {
+			return
+		}
+	}
+	t.Fatalf("free group = %v, want cline-free/kimi-k3", groups[freeModelGroup])
 }
 
 func TestFallbackModelsAreUsedWhenDiscoveryFails(t *testing.T) {

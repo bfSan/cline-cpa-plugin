@@ -119,7 +119,7 @@ func handleManagement(raw []byte) ([]byte, error) {
 	base := loadedManagementBasePath() + "/plugins/" + providerName
 	switch {
 	case req.Method == http.MethodGet && path == base+"/models":
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, modelCatalogResponse()))
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, modelCatalogResponse(req.Query.Get("refresh") != "")))
 	case req.Method == http.MethodPut && path == base+"/models":
 		var overlay modelOverlay
 		if err := json.Unmarshal(req.Body, &overlay); err != nil {
@@ -129,7 +129,7 @@ func handleManagement(raw []byte) ([]byte, error) {
 		if err != nil {
 			return okEnvelope(mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": err.Error()}))
 		}
-		return okEnvelope(mgmtJSONResponse(http.StatusOK, modelCatalogResponseWithState(state)))
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, modelCatalogResponseWithState(state, false)))
 	case req.Method == http.MethodPost && path == base+"/models/action":
 		return okEnvelope(handleModelAction(req.Body))
 	case req.Method == http.MethodGet && path == base+"/accounts":
@@ -296,13 +296,13 @@ type modelCatalogResponseWire struct {
 	Overlay  modelOverlayState     `json:"overlay"`
 }
 
-func modelCatalogResponse() modelCatalogResponseWire {
+func modelCatalogResponse(force bool) modelCatalogResponseWire {
 	state := loadedModelOverlayState()
-	return modelCatalogResponseWithState(state)
+	return modelCatalogResponseWithState(state, force)
 }
 
-func modelCatalogResponseWithState(state modelOverlayState) modelCatalogResponseWire {
-	base, groups, source := baseModelCatalog()
+func modelCatalogResponseWithState(state modelOverlayState, force bool) modelCatalogResponseWire {
+	base, groups, source := baseModelCatalogForce(force)
 	models := applyModelOverlayForAdmin(base, state.Overlay)
 	return modelCatalogResponseWire{
 		Provider: providerName,
@@ -354,7 +354,7 @@ func handleModelAction(raw []byte) pluginapi.ManagementResponse {
 	if err != nil {
 		return mgmtJSONResponse(http.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
-	return mgmtJSONResponse(http.StatusOK, modelCatalogResponseWithState(next))
+	return mgmtJSONResponse(http.StatusOK, modelCatalogResponseWithState(next, false))
 }
 
 func baseModelCatalogOnly() []pluginapi.ModelInfo {

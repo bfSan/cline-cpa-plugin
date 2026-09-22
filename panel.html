@@ -270,7 +270,7 @@ function saveKey(){
   if(!v)return;
   if(!storeSessionKey(v)){showAuth();return}
   document.getElementById("authBox").style.display="none";
-  load(false);
+  load(true);
 }
 function showAuth(){document.getElementById("authBox").style.display="block";const i=document.getElementById("keyInput");i&&i.focus()}
 function authHeaders(k){return k?{"Authorization":"Bearer "+k}:{}}
@@ -328,6 +328,7 @@ async function rawAPI(base,path,opts={}){
   return readPanelResponse(r);
 }
 function api(path,opts={}){return rawAPI(API,path,opts)}
+function managementAPI(path,opts={}){return rawAPI(MANAGEMENT_BASE_PATH,path,opts)}
 
 /* ---- accounts ---- */
 let currentGroup="all";
@@ -437,25 +438,57 @@ function updateGroupCounts(){
   const map={all:"cntAll",default:"cntDefault",clinepass:"cntPass",free:"cntFree",clinecloud:"cntCloud"};
   for(const [k,id] of Object.entries(map)){const el=document.getElementById(id);if(el)el.textContent=String(counts[k]||0)}
 }
-async function loadModels(showError){
+// fetchModels reads the catalog CPA actually serves.
+//
+// refresh=1 asks the plugin to pull each account from Cline again; without it the
+// plugin answers from its cache, so opening the panel never fans out one upstream
+// call per account. A failed pull falls back to the cached catalog instead of
+// blanking the section.
+async function fetchModels(refresh){
+  try{return await api("/models"+(refresh?"?refresh=1":""))}
+  catch(e){if(!refresh)throw e;return await api("/models")}
+}
+async function loadModels(showError,preserveOnEmpty){
   const box=document.getElementById("modelList");
   const srcEl=document.getElementById("modelSource");
   const hintEl=document.getElementById("modelHint");
   try{
-    const d=await api("/models");
-    lastModels=normalizeModels(d.models);
+    const d=await fetchModels(showError);
+    const next=normalizeModels(d.models);
+    // A config PATCH makes CPA drop and re-register the catalog, so a read that
+    // lands mid-reload comes back empty. Keeping the previous rows beats showing
+    // an empty list that the operator reads as "hiding deleted everything".
+    if(preserveOnEmpty&&next.length===0&&lastModels.length>0){
+      hintEl.textContent=`配置已保存，模型目录正在重载 · 暂时保留 ${lastModels.length} 个模型`;
+      renderModels();
+      return false;
+    }
+    lastModels=next;
     modelGroups=(d.groups&&typeof d.groups==="object")?d.groups:{};
     currentOverlay=d.overlay||{};
     const src=d.source||"none";
     srcEl.textContent=MODEL_SOURCE_LABEL[src]||src;
-    hintEl.textContent=`共 ${lastModels.length} 个模型 · 插件内隐藏/排序/添加配置`;
+    hintEl.textContent=`共 ${lastModels.length} 个模型 · 隐藏写入插件配置，排序和自定义仅内存`;
     updateGroupCounts();
     renderModels();
+    return true;
   }catch(e){
     box.innerHTML=`<div class="mut">加载失败：${esc(e.message||String(e))}</div>`;
     srcEl.textContent="—";
     if(showError)toast("模型加载失败","err",e.message||String(e));
+    return false;
   }
+}
+function hideListOf(d){
+  const inner=(d&&d.overlay&&d.overlay.overlay)||d.overlay||{};
+  return Array.isArray(inner.hide)?inner.hide:[];
+}
+async function waitForReloadedModels(){
+  for(let attempt=0;attempt<5;attempt++){
+    if(await loadModels(false,true))return true;
+    await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)));
+  }
+  return false;
 }
 function renderModels(){
   const box=document.getElementById("modelList");
@@ -491,7 +524,17 @@ async function modelAction(action,id,before){
     if(d&&d.models)lastModels=normalizeModels(d.models);
     if(d&&d.groups)modelGroups=d.groups;
     if(d&&d.overlay)currentOverlay=d.overlay;
-    if(action==="move"||action==="add")toast("排序和自定义模型仅保存在内存中，CPA 重启后恢复","warn");
+    if(action==="hide"||action==="restore"){
+      // The plugin overlay is process-local. CPA re-registers models from the
+      // persisted plugin config, so a hide that is not written back there shows
+      // up in this panel and nowhere else, and is gone after a restart.
+      await managementAPI("/plugins/cline/config",{method:"PATCH",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({hidden_models:hideListOf(d)})});
+      await waitForReloadedModels();
+    }else{
+      toast("排序和自定义模型仅保存在内存中，CPA 重启后恢复","warn");
+      await loadModels(false);
+    }
     updateGroupCounts();
     renderModels();
   }catch(e){toast("模型操作失败","err",e.message||String(e))}
@@ -511,7 +554,7 @@ async function load(force,btn){
   if(!getKey()){showAuth();g.innerHTML='<div class="loading">请先填写 management key</div>';return false}
   if(force){if(!btn)btn=document.getElementById("refreshBtn");busy(btn,true)}
   try{
-    const [acct,models]=await Promise.all([api("/accounts"),api("/models")]);
+    const [acct,models]=await Promise.all([api("/accounts"),fetchModels(force)]);
     lastAccounts=Array.isArray(acct.accounts)?acct.accounts:[];
     lastModels=normalizeModels(models.models);
     modelGroups=(models.groups&&typeof models.groups==="object")?models.groups:{};
@@ -614,7 +657,7 @@ document.getElementById("keyInput").addEventListener("keydown",e=>{if(e.key==="E
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&document.getElementById("oauthModal").classList.contains("show"))closeOAuthModal()});
 document.getElementById("apiPath").textContent=API;
 if(window.__clineThemeSync)window.__clineThemeSync();
-if(getKey())load(false);else showAuth();
+if(getKey())load(true);else showAuth();
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -150,12 +151,174 @@ func effectiveModelCatalogWithState() ([]pluginapi.ModelInfo, map[string][]strin
 }
 
 func baseModelCatalog() ([]pluginapi.ModelInfo, map[string][]string, string) {
-	modelCacheMu.RLock()
-	defer modelCacheMu.RUnlock()
-	if cached, ok := modelCache["global"]; ok && time.Since(cached.FetchedAt) < modelCacheTTL {
-		return cloneModelInfos(cached.Models), cloneGroups(cached.Groups), cached.Source
+	return baseModelCatalogForce(false)
+}
+
+// baseModelCatalogForce serves the merged per account catalog, which is what CPA
+// registers, and only falls back to the built in list when no account has a
+// catalog yet, for example straight after a restart before any client pulled one.
+func baseModelCatalogForce(force bool) ([]pluginapi.ModelInfo, map[string][]string, string) {
+	if models, groups, source, ok := authModelCatalog(force); ok {
+		return models, groups, source
 	}
 	return fallbackModels(), fallbackGroups(), "fallback"
+}
+
+// authModelCatalog merges the per account catalogs into the list CPA actually
+// serves.
+//
+// This replaced a read of modelCache["global"], which nothing ever wrote:
+// accountCacheKey only yields "global" for an auth with neither an id nor an
+// email, so the merge never hit and the panel rendered fallbackModels() and
+// labelled itself 内置回退 permanently. The consequence was visible to operators:
+// a model Cline published after that built in list was cut could not be hidden
+// from the UI, because the UI never showed it, even though CPA was serving it.
+//
+// force refreshes each account the way a client request would. It is off by
+// default so simply opening the panel cannot fan out one upstream call per
+// account; the panel's refresh button asks for it explicitly.
+func authModelCatalog(force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	accounts, err := ownStoredAuths()
+	if err != nil {
+		return nil, nil, "", false
+	}
+	return mergeStoredAuthCatalogs(accounts, force)
+}
+
+// ownStoredAuths reads the plugin's own auth files through the host.
+//
+// Split out from the merge because it is the only part that needs a running
+// CPA host, which leaves mergeStoredAuthCatalogs testable on its own.
+func ownStoredAuths() ([]*storedAuth, error) {
+	files, err := hostAuthListFiles()
+	if err != nil {
+		return nil, err
+	}
+	accounts := make([]*storedAuth, 0, len(files))
+	for _, file := range files {
+		if !isOwnAuthFile(file) {
+			continue
+		}
+		raw, errGet := hostAuthGetByIndex(file.AuthIndex)
+		if errGet != nil {
+			continue
+		}
+		sa, errParse := parseStored(raw)
+		if errParse != nil {
+			continue
+		}
+		accounts = append(accounts, sa)
+	}
+	return accounts, nil
+}
+
+// mergeStoredAuthCatalogs folds the account catalogs into the list CPA serves.
+//
+// With force set it refreshes each account the way a client request would.
+// Otherwise it only uses what is already cached, so that simply opening the
+// panel cannot fan out one upstream call per account; the panel's refresh
+// button asks for force explicitly.
+func mergeStoredAuthCatalogs(accounts []*storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	merger := newCatalogMerger()
+	pulled := 0
+	for _, sa := range accounts {
+		models, groups, source, ok := accountCatalogForMerge(sa, force)
+		if !ok {
+			continue
+		}
+		pulled++
+		merger.add(models, groups, source)
+	}
+	return merger.result(pulled)
+}
+
+// catalogMerger folds per account catalogs into the single list CPA serves.
+//
+// Several accounts usually offer the same model, so both the models and the
+// group memberships have to dedupe by ID; without that the panel shows the same
+// ID once per account and a group lists a member twice.
+type catalogMerger struct {
+	seen      map[string]struct{}
+	merged    []pluginapi.ModelInfo
+	groups    map[string][]string
+	groupSeen map[string]map[string]struct{}
+	source    string
+}
+
+func newCatalogMerger() *catalogMerger {
+	return &catalogMerger{
+		seen:      make(map[string]struct{}),
+		merged:    make([]pluginapi.ModelInfo, 0, 32),
+		groups:    make(map[string][]string),
+		groupSeen: make(map[string]map[string]struct{}),
+	}
+}
+
+func (m *catalogMerger) add(models []pluginapi.ModelInfo, groups map[string][]string, source string) {
+	// Any account backed by the real upstream catalog is enough to call the merged
+	// list upstream-sourced. "fallback" means that account could not fetch, so it
+	// must never outrank a real one.
+	if m.source == "" || m.source == "fallback" {
+		if source != "" && source != "fallback" {
+			m.source = source
+		} else if source == "fallback" && m.source == "" {
+			m.source = source
+		}
+	}
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if _, dup := m.seen[id]; dup {
+			continue
+		}
+		m.seen[id] = struct{}{}
+		m.merged = append(m.merged, model)
+	}
+	for group, ids := range groups {
+		members, has := m.groupSeen[group]
+		if !has {
+			members = make(map[string]struct{}, len(ids))
+			m.groupSeen[group] = members
+		}
+		for _, id := range ids {
+			if _, dup := members[id]; dup {
+				continue
+			}
+			members[id] = struct{}{}
+			m.groups[group] = append(m.groups[group], id)
+		}
+	}
+}
+
+// result reports ok when at least one account contributed a model. pulled is
+// counted by the caller because an account can be present but contribute nothing.
+func (m *catalogMerger) result(pulled int) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	if pulled == 0 || len(m.merged) == 0 {
+		return nil, nil, "", false
+	}
+	if m.source == "" {
+		m.source = "fallback"
+	}
+	return m.merged, m.groups, m.source, true
+}
+
+// accountCatalogForMerge picks one account's catalog for the merge, without
+// going to the network unless the caller asked for a refresh.
+func accountCatalogForMerge(sa *storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	if !force {
+		modelCacheMu.RLock()
+		cached, ok := modelCache[accountCacheKey(sa)]
+		modelCacheMu.RUnlock()
+		if ok && time.Since(cached.FetchedAt) < modelCacheTTL {
+			// Clone so a merge can never hand the caller an alias of the cache.
+			return cloneModelInfos(cached.Models), cloneGroups(cached.Groups), cached.Source, true
+		}
+		return nil, nil, "", false
+	}
+	models, groups, source, _ := refreshModelCatalog(freshStoredAuth(sa, nil))
+	return models, groups, source, len(models) > 0
 }
 
 func modelCatalogForAuth(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][]string, string) {
@@ -166,8 +329,28 @@ func modelCatalogForAuth(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][]st
 	if ok && time.Since(cached.FetchedAt) < modelCacheTTL {
 		return cloneModelInfos(cached.Models), cloneGroups(cached.Groups), cached.Source
 	}
+	models, groups, source, _ := refreshModelCatalog(sa)
+	return models, groups, source
+}
+
+// refreshModelCatalog pulls the catalog and caches it.
+//
+// A failed pull keeps whatever was cached before rather than storing the built
+// in fallback: an operator pressing refresh during a brief upstream hiccup would
+// otherwise serve the wrong list for a full TTL, which is the failure mode this
+// whole path is meant to remove. The error is still returned so an admin call can
+// report it, and callers that only need a usable list may ignore it.
+func refreshModelCatalog(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][]string, string, error) {
+	key := accountCacheKey(sa)
 	models, groups, source, entitlement, err := fetchRecommendedModels(sa)
 	if err != nil {
+		modelCacheMu.RLock()
+		previous, had := modelCache[key]
+		modelCacheMu.RUnlock()
+		if had && len(previous.Models) > 0 {
+			log.Printf("cline: refresh failed for %s, keeping the previous catalog: %v", key, err)
+			return cloneModelInfos(previous.Models), cloneGroups(previous.Groups), previous.Source, err
+		}
 		models, groups, source = fallbackModels(), fallbackGroups(), "fallback"
 	}
 	modelCacheMu.Lock()
@@ -179,7 +362,7 @@ func modelCatalogForAuth(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][]st
 		Entitlement: entitlement,
 	}
 	modelCacheMu.Unlock()
-	return models, groups, source
+	return models, groups, source, err
 }
 
 func accountCacheKey(sa *storedAuth) string {
@@ -366,13 +549,7 @@ func cloneModelInfos(models []pluginapi.ModelInfo) []pluginapi.ModelInfo {
 }
 
 func modelOverlayMatchesAnyID(overlay modelOverlay, id string) bool {
-	id = strings.TrimSpace(id)
-	for _, hidden := range overlay.Hide {
-		if strings.TrimSpace(hidden) == id {
-			return true
-		}
-	}
-	return false
+	return newHiddenSet(overlay.Hide).hides(strings.TrimSpace(id))
 }
 
 func defaultModelInfo(id, name string) pluginapi.ModelInfo {

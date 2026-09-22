@@ -273,7 +273,7 @@ func pluginRegistration() registration {
 			Logo:             pluginLogoURL,
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Optional complete model list. Empty uses Cline recommended-models discovery."},
-				{Name: "hidden_models", Type: pluginapi.ConfigFieldTypeArray, Description: "Plugin-owned model deny-list; hidden IDs never reach the host model registry."},
+				{Name: "hidden_models", Type: pluginapi.ConfigFieldTypeArray, Description: "Plugin-owned model deny-list; hidden IDs never reach the host model registry. A trailing * hides a whole family, so cline-pass/* also covers models published later."},
 				{Name: "model_groups", Type: pluginapi.ConfigFieldTypeObject, Description: "Optional group labels/ordering for the management panel."},
 			},
 		},

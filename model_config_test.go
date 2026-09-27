@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -171,22 +172,42 @@ func TestMergeStoredAuthCatalogsUsesRealAccountCaches(t *testing.T) {
 	}
 }
 
-// TestMergeStoredAuthCatalogsWithoutCacheKeepsFallback guards the other side: an
-// account with no cached catalog yet must not produce an empty list, which would
-// blank out every cline model in CPA.
-func TestMergeStoredAuthCatalogsWithoutCacheKeepsFallback(t *testing.T) {
-	modelCacheMu.Lock()
-	previous := modelCache
-	modelCache = map[string]cachedModelCatalog{}
-	modelCacheMu.Unlock()
-	t.Cleanup(func() {
-		modelCacheMu.Lock()
-		modelCache = previous
-		modelCacheMu.Unlock()
-	})
+// TestMergeStoredAuthCatalogsWithoutCacheDiscoversUpstream pins the fix for the
+// "the plugin never picks up new upstream models" report.
+//
+// The cache is process local, so a CPA restart empties it. The non-forced merge
+// used to return ok=false on a miss instead of fetching, so a freshly restarted
+// process served the built in fallback list and every model Cline had published
+// since that list was cut stayed invisible until somebody pressed refresh.
+func TestMergeStoredAuthCatalogsWithoutCacheDiscoversUpstream(t *testing.T) {
+	calls := 0
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"recommended":[{"id":"spacexai/grok-4.7","name":"grok-4.7"}],"free":[],"clinePass":[],"clineCloud":[]}`))
+	}))
+	withModelCache(t, map[string]cachedModelCatalog{})
 
-	if _, _, _, ok := mergeStoredAuthCatalogs([]*storedAuth{{Account: storedAccount{ID: "uncached"}}}, false); ok {
-		t.Fatal("an uncached account must fall back, not serve an empty catalog")
+	sa := testStoredAuth()
+	models, _, source, ok := mergeStoredAuthCatalogs([]*storedAuth{sa}, false)
+	if !ok {
+		t.Fatal("a cold cache must discover upstream, not fall back silently")
+	}
+	if calls != 1 {
+		t.Fatalf("a cold cache must trigger exactly one upstream pull, got %d", calls)
+	}
+	if joined := joinIDs(models); !strings.Contains(joined, "spacexai/grok-4.7") {
+		t.Fatalf("a model published upstream must appear on a cold cache: %s", joined)
+	}
+	if source != "cline-recommended" {
+		t.Fatalf("a cold cache pull must report the upstream source, got %s", source)
+	}
+
+	// The pull warmed the cache, so a second non-forced merge must not go out again.
+	if _, _, _, ok := mergeStoredAuthCatalogs([]*storedAuth{sa}, false); !ok {
+		t.Fatal("the warmed catalog must be usable")
+	}
+	if calls != 1 {
+		t.Fatalf("a warm cache must not re-fetch, got %d calls", calls)
 	}
 }
 
@@ -277,5 +298,46 @@ func TestFailedRefreshKeepsPreviousCatalog(t *testing.T) {
 	}
 	if source != "cline-recommended" {
 		t.Fatalf("must keep the real source, not %s", source)
+	}
+}
+
+// TestForcedRefreshFailureReachesTheCaller keeps the refresh button honest.
+//
+// A failed forced pull deliberately answers 200 with the previous catalog, so
+// without a reported error the panel cannot tell "upstream had nothing new" from
+// "the pull failed" and shows a success toast either way.
+func TestForcedRefreshFailureReachesTheCaller(t *testing.T) {
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	sa := testStoredAuth()
+	withModelCache(t, map[string]cachedModelCatalog{
+		accountCacheKey(sa): {
+			Models:    []pluginapi.ModelInfo{{ID: "cline-free/kimi-k3"}},
+			Groups:    map[string][]string{"free": {"cline-free/kimi-k3"}},
+			FetchedAt: time.Now(),
+			Source:    "cline-recommended",
+		},
+	})
+
+	_, _, _, refreshErr, ok := mergeStoredAuthCatalogsWithError([]*storedAuth{sa}, true)
+	if !ok {
+		t.Fatal("a failed forced pull must still serve the previous catalog")
+	}
+	if refreshErr == nil {
+		t.Fatal("a failed forced pull must report its error to the caller")
+	}
+
+	// A successful pull must not carry the field at all, so the panel's
+	// "refresh_failed" check stays meaningful.
+	withUpstream(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"recommended":[{"id":"cline-pass/mimo-v2.6-flash","name":"Mimo"}],"free":[],"clinePass":[],"clineCloud":[]}`))
+	}))
+	encoded, err := json.Marshal(modelCatalogResponse(true))
+	if err != nil {
+		t.Fatalf("encode catalog response: %v", err)
+	}
+	if strings.Contains(string(encoded), "refresh_error") {
+		t.Fatalf("a successful pull must omit refresh_error: %s", encoded)
 	}
 }

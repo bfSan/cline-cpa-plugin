@@ -288,12 +288,19 @@ func findOwnAuthFile(authIndex string) (hostAuthFileEntry, []byte, error) {
 	return hostAuthFileEntry{}, nil, fmt.Errorf("auth %s not found", authIndex)
 }
 
+// modelCatalogResponseWire is the panel's catalog payload.
+//
+// RefreshFailed/RefreshError report the outcome of a forced pull. A failed pull
+// still answers 200 with the previous catalog on purpose (blanking the section
+// would be worse), so without these fields the panel cannot tell "upstream had
+// nothing new" from "the pull failed", and the refresh button silently lies.
 type modelCatalogResponseWire struct {
-	Provider string                `json:"provider"`
-	Source   string                `json:"source"`
-	Groups   map[string][]string   `json:"groups"`
-	Models   []pluginapi.ModelInfo `json:"models"`
-	Overlay  modelOverlayState     `json:"overlay"`
+	Provider     string                `json:"provider"`
+	Source       string                `json:"source"`
+	Groups       map[string][]string   `json:"groups"`
+	Models       []pluginapi.ModelInfo `json:"models"`
+	Overlay      modelOverlayState     `json:"overlay"`
+	RefreshError string                `json:"refresh_error,omitempty"`
 }
 
 func modelCatalogResponse(force bool) modelCatalogResponseWire {
@@ -302,15 +309,19 @@ func modelCatalogResponse(force bool) modelCatalogResponseWire {
 }
 
 func modelCatalogResponseWithState(state modelOverlayState, force bool) modelCatalogResponseWire {
-	base, groups, source := baseModelCatalogForce(force)
+	base, groups, source, refreshErr := baseModelCatalogForceWithError(force)
 	models := applyModelOverlayForAdmin(base, state.Overlay)
-	return modelCatalogResponseWire{
+	resp := modelCatalogResponseWire{
 		Provider: providerName,
 		Source:   source,
 		Groups:   groups,
 		Models:   models,
 		Overlay:  state,
 	}
+	if refreshErr != nil {
+		resp.RefreshError = refreshErr.Error()
+	}
+	return resp
 }
 
 type modelActionRequest struct {

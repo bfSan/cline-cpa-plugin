@@ -444,9 +444,28 @@ function updateGroupCounts(){
 // plugin answers from its cache, so opening the panel never fans out one upstream
 // call per account. A failed pull falls back to the cached catalog instead of
 // blanking the section.
+//
+// The forced read is the refresh button's whole purpose, so it must not be
+// silently downgraded to a cached read. Two separate failures can happen: the
+// plugin answers 200 while its own upstream pull failed (reported as
+// refresh_error in the body), or the plugin call itself fails. Both are surfaced
+// as refresh_failed, because the operator otherwise presses refresh, sees an
+// unchanged list, and cannot tell "no new models upstream" from "the pull
+// actually failed".
 async function fetchModels(refresh){
-  try{return await api("/models"+(refresh?"?refresh=1":""))}
-  catch(e){if(!refresh)throw e;return await api("/models")}
+  if(!refresh)return await api("/models");
+  try{
+    const d=await api("/models?refresh=1");
+    // The plugin keeps serving the previous catalog on a failed pull, so a 200
+    // is not proof the refresh worked; trust its own refresh_error field.
+    if(d&&d.refresh_error)d.refresh_failed=true;
+    return d;
+  }catch(e){
+    const d=await api("/models");
+    d.refresh_failed=true;
+    d.refresh_error=(e&&(e.message||String(e)))||"刷新失败";
+    return d;
+  }
 }
 async function loadModels(showError,preserveOnEmpty){
   const box=document.getElementById("modelList");
@@ -565,7 +584,16 @@ async function load(force,btn){
     renderSummary();
     updateGroupCounts();
     renderModels();
-    if(force)toast("数据已刷新","ok",lastAccounts.length+" 个账号 · "+lastModels.length+" 个模型");
+    if(force){
+      // Tell the operator what the pull actually did. Without this a refresh that
+      // failed upstream looks identical to one that found nothing new, because
+      // both render the same cached list.
+      if(models.refresh_failed){
+        toast("已拉取，但上游刷新失败","err",models.refresh_error||"沿用缓存列表");
+      }else{
+        toast("数据已刷新","ok",lastAccounts.length+" 个账号 · "+lastModels.length+" 个模型");
+      }
+    }
     return true;
   }catch(e){
     if(force)toast("刷新失败","err",e.message||String(e));

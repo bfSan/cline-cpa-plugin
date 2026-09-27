@@ -158,10 +158,18 @@ func baseModelCatalog() ([]pluginapi.ModelInfo, map[string][]string, string) {
 // registers, and only falls back to the built in list when no account has a
 // catalog yet, for example straight after a restart before any client pulled one.
 func baseModelCatalogForce(force bool) ([]pluginapi.ModelInfo, map[string][]string, string) {
-	if models, groups, source, ok := authModelCatalog(force); ok {
-		return models, groups, source
+	models, groups, source, _ := baseModelCatalogForceWithError(force)
+	return models, groups, source
+}
+
+// baseModelCatalogForceWithError is baseModelCatalogForce plus the forced pull's
+// error, so an admin response can report a failed refresh instead of serving the
+// previous catalog with no way for the caller to notice.
+func baseModelCatalogForceWithError(force bool) ([]pluginapi.ModelInfo, map[string][]string, string, error) {
+	if models, groups, source, err, ok := authModelCatalog(force); ok {
+		return models, groups, source, err
 	}
-	return fallbackModels(), fallbackGroups(), "fallback"
+	return fallbackModels(), fallbackGroups(), "fallback", nil
 }
 
 // authModelCatalog merges the per account catalogs into the list CPA actually
@@ -177,12 +185,13 @@ func baseModelCatalogForce(force bool) ([]pluginapi.ModelInfo, map[string][]stri
 // force refreshes each account the way a client request would. It is off by
 // default so simply opening the panel cannot fan out one upstream call per
 // account; the panel's refresh button asks for it explicitly.
-func authModelCatalog(force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+func authModelCatalog(force bool) ([]pluginapi.ModelInfo, map[string][]string, string, error, bool) {
 	accounts, err := ownStoredAuths()
 	if err != nil {
-		return nil, nil, "", false
+		return nil, nil, "", err, false
 	}
-	return mergeStoredAuthCatalogs(accounts, force)
+	models, groups, source, refreshErr, ok := mergeStoredAuthCatalogsWithError(accounts, force)
+	return models, groups, source, refreshErr, ok
 }
 
 // ownStoredAuths reads the plugin's own auth files through the host.
@@ -219,17 +228,30 @@ func ownStoredAuths() ([]*storedAuth, error) {
 // panel cannot fan out one upstream call per account; the panel's refresh
 // button asks for force explicitly.
 func mergeStoredAuthCatalogs(accounts []*storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	models, groups, source, _, ok := mergeStoredAuthCatalogsWithError(accounts, force)
+	return models, groups, source, ok
+}
+
+// mergeStoredAuthCatalogsWithError folds the account catalogs into the list CPA
+// serves and reports whether any account failed to refresh, so a forced pull can
+// tell the caller the truth while still returning a usable list.
+func mergeStoredAuthCatalogsWithError(accounts []*storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, error, bool) {
 	merger := newCatalogMerger()
 	pulled := 0
+	var refreshErr error
 	for _, sa := range accounts {
-		models, groups, source, ok := accountCatalogForMerge(sa, force)
+		models, groups, source, err, ok := accountCatalogForMergeWithError(sa, force)
+		if err != nil && refreshErr == nil {
+			refreshErr = err
+		}
 		if !ok {
 			continue
 		}
 		pulled++
 		merger.add(models, groups, source)
 	}
-	return merger.result(pulled)
+	merged, groups, source, ok := merger.result(pulled)
+	return merged, groups, source, refreshErr, ok
 }
 
 // catalogMerger folds per account catalogs into the single list CPA serves.
@@ -304,21 +326,37 @@ func (m *catalogMerger) result(pulled int) ([]pluginapi.ModelInfo, map[string][]
 	return m.merged, m.groups, m.source, true
 }
 
-// accountCatalogForMerge picks one account's catalog for the merge, without
-// going to the network unless the caller asked for a refresh.
+// accountCatalogForMerge picks one account's catalog for the merge.
+//
+// A warm cache is served as is. A cold or expired one is refreshed here rather
+// than abandoned: returning ok=false on a miss meant that after every CPA
+// restart, and for the whole first model listing of a fresh process, the merge
+// found no contributor and the caller silently served the built in fallback
+// list. That is the "the plugin never picks up new upstream models" report: the
+// cache is process local, so a restart emptied it and upstream discovery never
+// ran unless somebody pressed the panel's refresh button.
+//
+// force is still honoured separately: it ignores a warm cache so the refresh
+// button cannot be swallowed by the TTL.
 func accountCatalogForMerge(sa *storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, bool) {
+	models, groups, source, _, ok := accountCatalogForMergeWithError(sa, force)
+	return models, groups, source, ok
+}
+
+// accountCatalogForMergeWithError also returns the refresh error so a forced pull
+// can report the failure while the merge still uses whatever the cache kept.
+func accountCatalogForMergeWithError(sa *storedAuth, force bool) ([]pluginapi.ModelInfo, map[string][]string, string, error, bool) {
 	if !force {
 		modelCacheMu.RLock()
 		cached, ok := modelCache[accountCacheKey(sa)]
 		modelCacheMu.RUnlock()
 		if ok && time.Since(cached.FetchedAt) < modelCacheTTL {
 			// Clone so a merge can never hand the caller an alias of the cache.
-			return cloneModelInfos(cached.Models), cloneGroups(cached.Groups), cached.Source, true
+			return cloneModelInfos(cached.Models), cloneGroups(cached.Groups), cached.Source, nil, true
 		}
-		return nil, nil, "", false
 	}
-	models, groups, source, _ := refreshModelCatalog(freshStoredAuth(sa, nil))
-	return models, groups, source, len(models) > 0
+	models, groups, source, err := refreshModelCatalog(freshStoredAuth(sa, nil))
+	return models, groups, source, err, len(models) > 0
 }
 
 func modelCatalogForAuth(sa *storedAuth) ([]pluginapi.ModelInfo, map[string][]string, string) {

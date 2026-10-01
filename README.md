@@ -13,7 +13,9 @@ device flow, so an API key is not required.
 - WorkOS device login, returning a CPA auth record
 - Cline OAuth refresh (`/api/v1/auth/refresh`)
 - Cline recommended model catalog (`recommended`, `free`, `clinePass`,
-  `clineCloud`), discovered from upstream and merged into the CPA model list
+  `clineCloud`), discovered from upstream and mirroring it exactly — the plugin
+  adds no models of its own, so an ID Cline retires disappears on the next pull
+  instead of lingering in the panel as a dead entry
 - Cold-cache discovery: the first model listing after a restart fetches the
   upstream catalog instead of falling back to the embedded list, so newly
   published models are visible immediately

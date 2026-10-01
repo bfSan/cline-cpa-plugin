@@ -94,7 +94,7 @@ func TestRecommendedModelsParseFourGroups(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{
 			"recommended":[{"id":"openai/gpt-6-astra","name":"GPT-6 Astra"}],
-			"free":[{"id":"cline-free/kimi-k3","name":"Kimi K3"}],
+			"free":[{"id":"cline-free/deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash"}],
 			"clinePass":[{"id":"cline-pass/glm-5.3","name":"GLM 5.3"},{"id":"cline-pass/kimi-k3","name":"Kimi K3"}],
 			"clineCloud":[{"id":"cline-cloud/glm-5.3","name":"Cloud GLM"}]
 		}`))
@@ -108,57 +108,84 @@ func TestRecommendedModelsParseFourGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchRecommendedModels error = %v", err)
 	}
-	if len(models) != 9 {
-		t.Fatalf("models = %d, want 5 feed + 4 compatibility-only models", len(models))
+	// The catalog mirrors the upstream feed exactly: no local additions.
+	if len(models) != 5 {
+		t.Fatalf("models = %d, want exactly the 5 upstream entries", len(models))
 	}
-	if len(groups[passModelGroup]) != 6 {
-		t.Fatalf("clinepass group = %v, want 2 feed + 4 compatibility ids", groups[passModelGroup])
+	if len(groups[passModelGroup]) != 2 {
+		t.Fatalf("clinepass group = %v, want the 2 feed ids", groups[passModelGroup])
 	}
-	if len(groups[freeModelGroup]) != 1 || groups[freeModelGroup][0] != "cline-free/kimi-k3" {
+	if len(groups[freeModelGroup]) != 1 || groups[freeModelGroup][0] != "cline-free/deepseek-v4.1-flash" {
 		t.Fatalf("free group = %v", groups[freeModelGroup])
 	}
 	if len(groups[cloudModelGroup]) != 1 {
 		t.Fatalf("cloud group = %v", groups[cloudModelGroup])
 	}
-	for _, id := range []string{"cline-free/kimi-k3", "cline-pass/glm-5.2", "cline-pass/kimi-k2.7-code", "cline-pass/kimi-k2.6", "cline-pass/deepseek-v4-flash"} {
-		found := false
-		for _, model := range models {
-			if model.ID == id {
-				found = true
-				break
+}
+
+// TestCatalogDropsModelsRetiredUpstream pins the reason clientCompatibilityModels
+// was deleted: it kept five IDs alive that upstream had already retired, and
+// cline-free/solar-pro4 was hardcoded a second time in fallbackModels(). All six
+// answered 404, so the panel advertised models that could never run. The catalog
+// must now follow the feed, so a retired ID disappears on the next pull.
+func TestCatalogDropsModelsRetiredUpstream(t *testing.T) {
+	for _, id := range []string{
+		"cline-free/kimi-k3",
+		"cline-pass/glm-5.2",
+		"cline-pass/deepseek-v4-flash",
+		"cline-pass/kimi-k2.7-code",
+		"cline-pass/kimi-k2.6",
+		"cline-free/solar-pro4",
+	} {
+		for _, listed := range fallbackModels() {
+			if listed.ID == id {
+				t.Fatalf("retired model %q is still hardcoded in fallbackModels()", id)
 			}
 		}
-		if !found {
-			t.Fatalf("client-compatible model %q missing from discovered catalog", id)
+		for group, ids := range fallbackGroups() {
+			for _, listed := range ids {
+				if listed == id {
+					t.Fatalf("retired model %q is still listed in fallbackGroups()[%s]", id, group)
+				}
+			}
 		}
 	}
 }
 
-func TestMergeModelCatalogDeduplicatesRequiredModels(t *testing.T) {
-	primary := []pluginapi.ModelInfo{
-		{ID: "openai/gpt-6-astra"},
-		{ID: "cline-free/kimi-k3"},
-	}
-	primaryGroups := map[string][]string{
-		staticModelGroup: {"openai/gpt-6-astra"},
-		freeModelGroup:   {"cline-free/kimi-k3"},
-	}
-	models, groups := mergeModelCatalog(primary, primaryGroups, clientCompatibilityModels(), clientCompatibilityGroups())
-	seen := map[string]int{}
-	for _, model := range models {
-		seen[model.ID]++
-	}
-	for id, count := range seen {
-		if count != 1 {
-			t.Fatalf("model %q appeared %d times after merge", id, count)
+// TestClineHeadersCarryClientIdentity pins the header contract that upstream's
+// "product surfaces" gate enforces. Cline returns 403 for every cline-free/*
+// model when X-CLIENT-TYPE is missing or empty, and its error text blames an
+// outdated client, so a regression here is expensive to diagnose: it looks like
+// a version problem and is actually a missing header. The value itself is not
+// validated upstream, only its presence.
+func TestClineHeadersCarryClientIdentity(t *testing.T) {
+	h := clineHeaders("token-abc")
+	for _, key := range []string{
+		"X-CLIENT-TYPE",
+		"X-CLIENT-VERSION",
+		"X-PLATFORM",
+		"X-PLATFORM-VERSION",
+		"X-CORE-VERSION",
+	} {
+		if strings.TrimSpace(h.Get(key)) == "" {
+			t.Fatalf("header %s must be non-empty; upstream 403s cline-free/* without it", key)
 		}
 	}
-	for _, id := range groups[freeModelGroup] {
-		if id == "cline-free/kimi-k3" {
-			return
+	if got := h.Get("Authorization"); got != "Bearer workos:token-abc" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := h.Get("X-CLIENT-TYPE"); got != "cline-sdk" {
+		t.Fatalf("X-CLIENT-TYPE = %q", got)
+	}
+	// The version headers must track the single constant, not drift apart.
+	for _, key := range []string{"X-CLIENT-VERSION", "X-PLATFORM-VERSION", "X-CORE-VERSION"} {
+		if got := h.Get(key); got != clineClientVersion {
+			t.Fatalf("%s = %q, want %q", key, got, clineClientVersion)
 		}
 	}
-	t.Fatalf("free group = %v, want cline-free/kimi-k3", groups[freeModelGroup])
+	if got := h.Get("User-Agent"); got != "Cline/"+clineClientVersion {
+		t.Fatalf("User-Agent = %q", got)
+	}
 }
 
 func TestFallbackModelsAreUsedWhenDiscoveryFails(t *testing.T) {

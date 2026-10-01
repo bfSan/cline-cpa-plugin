@@ -66,10 +66,16 @@ const (
 	clineAppBase   = "https://app.cline.bot"
 	workOSClientID = "client_01K3A541FN8TA3EPPHTD2325AR"
 	workOSTokenPfx = "workos:"
-	clineUserAgent = "Cline/0.0.32"
-	loginTTL       = 10 * time.Minute
-	modelCacheTTL  = 5 * time.Minute
-	requestTimeout = 120 * time.Second
+	// clineClientVersion is the Cline Desktop release this plugin imitates. It
+	// feeds four headers, so keeping it in one place avoids the drift that left
+	// the value at 0.0.32 while upstream had moved on. Upstream does not validate
+	// it today, but a stale client fingerprint is an unnecessary risk if the
+	// "product surfaces" gate ever starts checking versions.
+	clineClientVersion = "0.0.40"
+	clineUserAgent     = "Cline/" + clineClientVersion
+	loginTTL           = 10 * time.Minute
+	modelCacheTTL      = 5 * time.Minute
+	requestTimeout     = 120 * time.Second
 )
 
 // clineAPIBase and workOSAPIBase are vars so tests can point them at httptest
@@ -260,7 +266,7 @@ type registrationCapability struct {
 	ManagementAPI         bool                         `json:"management_api"`
 }
 
-var version = "0.1.1"
+var version = "0.1.2"
 
 func pluginRegistration() registration {
 	return registration{
@@ -366,10 +372,10 @@ func clineHeaders(accessToken string) http.Header {
 	h.Set("X-Title", "Cline")
 	h.Set("X-IS-MULTIROOT", "false")
 	h.Set("X-CLIENT-TYPE", "cline-sdk")
-	h.Set("X-CLIENT-VERSION", "0.0.32")
+	h.Set("X-CLIENT-VERSION", clineClientVersion)
 	h.Set("X-PLATFORM", "darwin")
-	h.Set("X-PLATFORM-VERSION", "0.0.32")
-	h.Set("X-CORE-VERSION", "0.0.32")
+	h.Set("X-PLATFORM-VERSION", clineClientVersion)
+	h.Set("X-CORE-VERSION", clineClientVersion)
 	h.Set("User-Agent", clineUserAgent)
 	return h
 }

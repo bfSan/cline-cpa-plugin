@@ -257,9 +257,9 @@ func TestForceRefreshBypassesCacheTTL(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("want one forced upstream pull, got %d", calls)
 	}
-	// The forced pull replaces the cached entry. clientCompatibilityModels() is
-	// still merged in by fetchRecommendedModels, so the assertions here are about
-	// the stale model leaving and the new one arriving, not an exact list.
+	// The forced pull replaces the cached entry, and the catalog now mirrors the
+	// upstream feed exactly, so the assertions here are about the stale model
+	// leaving and the new one arriving, not an exact list.
 	joined := joinIDs(models)
 	if !strings.Contains(joined, "cline-pass/mimo-v2.6-flash") {
 		t.Fatalf("the newly published model must appear after a forced refresh: %s", joined)
